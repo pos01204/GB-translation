@@ -10,7 +10,7 @@ git add .
 git status
 echo.
 echo Committing changes...
-git commit -m "fix: Use generate_content_async for translation, add detailed logging"
+git commit -m "fix: Auto-detect available Gemini model (gemini-pro fallback)"
 echo.
 echo Pushing to remote...
 git push

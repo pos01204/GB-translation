@@ -38,13 +38,48 @@ class ProductTranslator:
             print(f"🔧 Gemini API 초기화 중... (키 길이: {len(api_key)})")
             genai.configure(api_key=api_key)
             
-            # gemini-1.5-flash 사용
-            self._model_name = 'gemini-1.5-flash'
-            self.model = genai.GenerativeModel(self._model_name)
-            self.vision_model = genai.GenerativeModel(self._model_name)
+            # 사용 가능한 모델 목록 확인
+            print("📋 사용 가능한 모델 확인 중...")
+            available_models = []
+            try:
+                for model in genai.list_models():
+                    if 'generateContent' in [m.name for m in model.supported_generation_methods]:
+                        available_models.append(model.name)
+                        print(f"   - {model.name}")
+            except Exception as e:
+                print(f"   모델 목록 조회 실패: {e}")
             
-            self._initialized = True
-            print(f"✅ Gemini 모델 초기화 성공: {self._model_name}")
+            # 모델 선택 (우선순위)
+            model_candidates = [
+                'gemini-pro',           # 가장 기본
+                'gemini-1.0-pro',       # 1.0 버전
+                'gemini-1.5-flash',     # 1.5 flash
+                'gemini-1.5-pro',       # 1.5 pro
+            ]
+            
+            self._model_name = None
+            for candidate in model_candidates:
+                try:
+                    print(f"🔄 모델 시도: {candidate}")
+                    test_model = genai.GenerativeModel(candidate)
+                    # 간단한 테스트
+                    test_response = test_model.generate_content("Hello")
+                    if test_response:
+                        self._model_name = candidate
+                        self.model = test_model
+                        self.vision_model = genai.GenerativeModel(candidate)
+                        print(f"✅ 모델 선택됨: {candidate}")
+                        break
+                except Exception as e:
+                    print(f"   ❌ {candidate} 실패: {e}")
+                    continue
+            
+            if self._model_name:
+                self._initialized = True
+                print(f"✅ Gemini 모델 초기화 성공: {self._model_name}")
+            else:
+                print("❌ 사용 가능한 모델을 찾을 수 없습니다")
+                self._initialized = False
             
         except Exception as e:
             print(f"❌ Gemini 모델 초기화 실패: {e}")
