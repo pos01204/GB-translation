@@ -183,6 +183,32 @@ async def scrape_product(request: ScrapeRequest):
         )
 
 
+@app.get("/api/debug/scrape", tags=["Debug"])
+async def debug_scrape(url: str):
+    """
+    운영 진단용 디버그 엔드포인트.
+    - 옵션/이미지 개수, 일부 샘플 URL을 반환합니다.
+    """
+    global scraper
+    await initialize_services()
+    if not scraper:
+        return {"success": False, "message": "스크래퍼가 초기화되지 않았습니다."}
+    try:
+        data = await scraper.scrape_product(url)
+        return {
+            "success": True,
+            "url": data.url,
+            "title": data.title,
+            "artist_name": data.artist_name,
+            "options_count": len(data.options),
+            "options_sample": [{"name": o.name, "values": o.values[:5]} for o in (data.options or [])[:3]],
+            "detail_images_count": len(data.detail_images),
+            "detail_images_sample": (data.detail_images or [])[:10],
+        }
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 @app.options("/api/translate")
 async def translate_options():
     """CORS preflight 요청 처리"""

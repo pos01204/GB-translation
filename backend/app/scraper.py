@@ -334,20 +334,35 @@ class IdusScraper:
                     desc_candidates.append(s)
 
         # ---- images 후보 (detail images) ----
+        # Idus CDN은 확장자가 없거나 query로만 타입이 붙는 케이스가 있어 완화해서 수집
         img_candidates: list[str] = []
-        for _, k, v in items:
-            if isinstance(v, str) and ("http://" in v or "https://" in v):
-                if re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", v, re.IGNORECASE):
-                    # svg / icon 제외
-                    if v.lower().endswith(".svg"):
+        for path, k, v in items:
+            if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://")):
+                low = v.lower()
+                if low.endswith(".svg"):
+                    continue
+                # 1) 확장자 기반
+                if re.search(r"\.(jpg|jpeg|png|webp|gif)(\?|$)", v, re.IGNORECASE):
+                    img_candidates.append(v)
+                    continue
+                # 2) 키/경로 기반 (imageUrl, thumbnailUrl, etc)
+                k_low = k.lower()
+                p_low = path.lower()
+                if any(x in k_low for x in ["image", "img", "thumbnail", "thumb", "photo", "banner"]) or any(
+                    x in p_low for x in ["image", "img", "thumbnail", "detail", "description", "content"]
+                ):
+                    # 아이콘/스프라이트는 제외
+                    if any(x in low for x in ["sprite", "icon", "logo"]):
                         continue
                     img_candidates.append(v)
+
         img_candidates = list(dict.fromkeys(img_candidates))
 
         # ---- options 후보 ----
         # 다양한 구조를 커버하기 위해:
         # 1) option/value 형태의 dict list
         # 2) labels + values 배열
+        # 3) groupName/optionItems/variants 형태
         option_objs: list[dict[str, Any]] = []
         for path, k, v in items:
             if isinstance(v, list) and ("option" in k.lower() or "options" in k.lower()):
@@ -362,6 +377,11 @@ class IdusScraper:
                             "optionvalues" in lk or "values" in lk or "items" in lk
                         ):
                             option_objs.append(el)
+                        # groupName + optionItems/variants 형태
+                        if ("groupname" in lk or "optiongroupname" in lk) and (
+                            "optionitems" in lk or "variants" in lk or "items" in lk or "values" in lk
+                        ):
+                            option_objs.append(el)
 
         # dict 단독으로도 option group이 들어오는 케이스가 있어 추가로 탐색
         for path, k, v in items:
@@ -371,12 +391,32 @@ class IdusScraper:
                     "values" in lk or "items" in lk or "optionvalues" in lk
                 ):
                     option_objs.append(v)
+                if ("groupname" in lk or "optiongroupname" in lk) and (
+                    "optionitems" in lk or "variants" in lk or "items" in lk or "values" in lk or "optionvalues" in lk
+                ):
+                    option_objs.append(v)
 
         parsed_options: list[ProductOption] = []
         for obj in option_objs[:20]:
             try:
-                name = (obj.get("name") or obj.get("optionName") or obj.get("title") or obj.get("label") or "").strip()
-                vals_raw = obj.get("values") or obj.get("optionValues") or obj.get("items") or obj.get("value") or []
+                name = (
+                    obj.get("name")
+                    or obj.get("optionName")
+                    or obj.get("groupName")
+                    or obj.get("optionGroupName")
+                    or obj.get("title")
+                    or obj.get("label")
+                    or ""
+                ).strip()
+                vals_raw = (
+                    obj.get("values")
+                    or obj.get("optionValues")
+                    or obj.get("optionItems")
+                    or obj.get("variants")
+                    or obj.get("items")
+                    or obj.get("value")
+                    or []
+                )
                 values: list[str] = []
                 if isinstance(vals_raw, list):
                     for it in vals_raw[:200]:
@@ -385,7 +425,15 @@ class IdusScraper:
                             if s:
                                 values.append(s)
                         elif isinstance(it, dict):
-                            s = (it.get("name") or it.get("label") or it.get("value") or it.get("optionValue") or "").strip()
+                            s = (
+                                it.get("name")
+                                or it.get("label")
+                                or it.get("value")
+                                or it.get("optionValue")
+                                or it.get("displayName")
+                                or it.get("optionName")
+                                or ""
+                            ).strip()
                             if s:
                                 values.append(s)
                 elif isinstance(vals_raw, str):
@@ -399,6 +447,20 @@ class IdusScraper:
                     parsed_options.append(ProductOption(name=name, values=values))
             except:
                 continue
+
+        # 옵션이 여전히 비어있으면, next_data 전체에서 "옵션" 관련 문자열을 약하게 수집(최후의 안전장치)
+        if not parsed_options:
+            loose_values: list[str] = []
+            for path, k, v in items:
+                if isinstance(v, str) and ("option" in k.lower() or "option" in path.lower() or "옵션" in v):
+                    s = v.strip()
+                    if 2 <= len(s) <= 80 and s not in ("옵션", "옵션 선택", "옵션을 선택해주세요.", "선택", "선택하세요"):
+                        loose_values.append(s)
+            loose_values = list(dict.fromkeys(loose_values))
+            # 너무 일반적인 텍스트는 제외
+            loose_values = [v for v in loose_values if "옵션을 선택" not in v]
+            if loose_values:
+                parsed_options.append(ProductOption(name="옵션", values=loose_values[:50]))
         # 옵션 그룹명이 제대로 나오지 않는 경우가 많아서 중복 name을 합치기
         merged: dict[str, list[str]] = {}
         for opt in parsed_options:
@@ -425,7 +487,7 @@ class IdusScraper:
         description = pick_longest(desc_candidates, min_len=120, max_len=20000)[:6000]
 
         # 이미지: 너무 많은 경우엔 상위 N개만
-        max_imgs = 40
+        max_imgs = 80
         detail_images = img_candidates[:max_imgs]
 
         result: dict[str, Any] = {}
@@ -809,6 +871,12 @@ class IdusScraper:
             return []
         urls = re.findall(
             r"https?://[^\\\"'\\s>]+\\.(?:jpg|jpeg|png|webp)(?:\\?[^\\\"'\\s>]*)?",
+            html,
+            flags=re.IGNORECASE,
+        )
+        # 확장자 없는 CDN URL도 잡기 (idus 이미지 도메인/경로 기반)
+        urls += re.findall(
+            r"https?://[^\\\"'\\s>]+(?:image|img)[^\\\"'\\s>]+(?:\\?[^\\\"'\\s>]*)?",
             html,
             flags=re.IGNORECASE,
         )
