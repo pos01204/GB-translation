@@ -297,39 +297,116 @@ class IdusScraper:
         return "가격 정보 없음"
 
     async def _extract_description(self, page: Page) -> str:
-        """상품 설명 추출"""
+        """상품 설명 추출 - 상세 페이지의 POINT 등 텍스트 포함"""
+        descriptions = []
+        
+        # 1. 상세 정보 탭 클릭 시도
         try:
-            # meta description에서 추출
+            tab_selectors = ['text="작품정보"', 'text="상품정보"', 'text="상세정보"']
+            for sel in tab_selectors:
+                tab = await page.query_selector(sel)
+                if tab:
+                    await tab.click()
+                    await asyncio.sleep(1)
+                    print("📌 상세 정보 탭 클릭")
+                    break
+        except:
+            pass
+        
+        # 2. 상세 설명 영역에서 텍스트 추출 (POINT 01, 02 등)
+        try:
+            detail_text = await page.evaluate("""
+                () => {
+                    const texts = [];
+                    
+                    // 상세 설명 영역 셀렉터들
+                    const detailSelectors = [
+                        'article',
+                        '[class*="detail"]',
+                        '[class*="description"]',
+                        '[class*="content"]',
+                        '[class*="info"]',
+                        '[class*="story"]',
+                        'main'
+                    ];
+                    
+                    // UI 노이즈 필터
+                    const noisePatterns = [
+                        '로그인', '회원가입', '장바구니', '구매하기', '선물하기',
+                        '고객센터', '아이디어스 앱', '카카오', '네이버',
+                        '이용약관', '개인정보', '결제', '배송'
+                    ];
+                    
+                    for (const selector of detailSelectors) {
+                        const elements = document.querySelectorAll(selector);
+                        for (const el of elements) {
+                            // 텍스트 노드만 추출 (자식 요소의 중복 제외)
+                            const text = el.innerText || '';
+                            
+                            // 충분히 긴 텍스트만 (설명일 가능성)
+                            if (text.length < 50) continue;
+                            
+                            // UI 노이즈 필터링
+                            let isNoise = false;
+                            for (const noise of noisePatterns) {
+                                if (text.includes(noise) && text.length < 200) {
+                                    isNoise = true;
+                                    break;
+                                }
+                            }
+                            if (isNoise) continue;
+                            
+                            // POINT, 특징, 설명 등 키워드 포함 시 우선
+                            if (text.includes('POINT') || 
+                                text.includes('특징') || 
+                                text.includes('소개') ||
+                                text.includes('안내') ||
+                                text.includes('사용') ||
+                                text.includes('주의')) {
+                                texts.unshift(text);  // 앞에 추가
+                            } else {
+                                texts.push(text);
+                            }
+                        }
+                    }
+                    
+                    // 가장 긴 텍스트 반환 (상세 설명일 가능성 높음)
+                    if (texts.length > 0) {
+                        texts.sort((a, b) => b.length - a.length);
+                        return texts[0];
+                    }
+                    
+                    return null;
+                }
+            """)
+            
+            if detail_text and len(detail_text) > 50:
+                descriptions.append(detail_text)
+                print(f"📌 상세 설명 추출: {len(detail_text)}자")
+        except Exception as e:
+            print(f"상세 설명 추출 오류: {e}")
+        
+        # 3. meta description (폴백)
+        try:
             meta_desc = await page.evaluate("""
                 () => {
                     const meta = document.querySelector('meta[name="description"]');
-                    if (meta) {
-                        return meta.getAttribute('content');
-                    }
+                    if (meta) return meta.getAttribute('content');
                     const ogDesc = document.querySelector('meta[property="og:description"]');
-                    if (ogDesc) {
-                        return ogDesc.getAttribute('content');
-                    }
+                    if (ogDesc) return ogDesc.getAttribute('content');
                     return null;
                 }
             """)
             
             if meta_desc and len(meta_desc) > 20:
-                return meta_desc.strip()[:4000]
+                descriptions.append(meta_desc)
         except:
             pass
         
-        try:
-            # description 클래스 요소에서 추출
-            for sel in ['[class*="description"]', '[class*="detail"]', '[class*="content"]']:
-                el = await page.query_selector(sel)
-                if el:
-                    text = (await el.inner_text() or "").strip()
-                    # UI 텍스트가 아닌 실제 설명인지 확인
-                    if len(text) > 100 and "로그인" not in text and "회원가입" not in text:
-                        return text[:4000]
-        except:
-            pass
+        # 가장 긴 설명 반환
+        if descriptions:
+            descriptions.sort(key=len, reverse=True)
+            return descriptions[0][:6000]  # 최대 6000자
         
         return "설명 없음"
 

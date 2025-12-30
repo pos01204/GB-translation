@@ -10,7 +10,7 @@ git add .
 git status
 echo.
 echo Committing changes...
-git commit -m "fix: Use stable Gemini model (1.5-flash), add image gallery with download feature"
+git commit -m "fix: Complete rewrite of translator with better error handling, improve description extraction"
 echo.
 echo Pushing to remote...
 git push
