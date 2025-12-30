@@ -9,7 +9,9 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     # Playwright 브라우저 경로
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    # Railway PORT (기본값 8000)
+    PORT=8000
 
 # 시스템 의존성 설치 (Playwright Chromium 실행에 필요)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -37,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     libasound2 \
     libxshmfence1 \
-    # 폰트 (한글 지원) - fonts-nanum만 사용 (다른 패키지 포함됨)
+    # 폰트 (한글 지원)
     fonts-nanum \
     # 정리
     && apt-get clean \
@@ -57,12 +59,11 @@ RUN playwright install chromium \
 # 애플리케이션 코드 복사
 COPY ./app ./app
 
-# 포트 노출
-EXPOSE 8000
+# 포트 노출 (Railway가 동적으로 설정)
+EXPOSE ${PORT}
 
-# 헬스체크
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+# 헬스체크 제거 (Railway에서 관리)
+# HEALTHCHECK는 Railway의 healthcheckPath와 충돌할 수 있음
 
-# 서버 실행
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 서버 실행 - Railway의 PORT 환경변수 사용
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT}

@@ -4,6 +4,7 @@ Playwright + playwright-stealth를 사용하여 봇 탐지 우회
 """
 import asyncio
 import re
+import os
 from typing import Optional
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from playwright_stealth import stealth_async
@@ -18,15 +19,23 @@ class IdusScraper:
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.playwright = None
+        self._initialized = False
         
     async def initialize(self):
         """Playwright 브라우저 초기화"""
-        self.playwright = await async_playwright().start()
+        if self._initialized:
+            return
+            
+        print("🔧 Playwright 브라우저 초기화 중...")
         
-        # Chromium 브라우저 실행 (headless 모드)
-        self.browser = await self.playwright.chromium.launch(
-            headless=True,
-            args=[
+        try:
+            self.playwright = await async_playwright().start()
+            
+            # Railway/Docker 환경 감지
+            is_docker = os.path.exists('/.dockerenv') or os.getenv('RAILWAY_ENVIRONMENT')
+            
+            # Chromium 브라우저 실행 (headless 모드)
+            launch_args = [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
@@ -34,25 +43,64 @@ class IdusScraper:
                 '--no-first-run',
                 '--no-zygote',
                 '--disable-gpu',
-                '--single-process',  # Railway 환경 호환성
             ]
-        )
+            
+            # Docker 환경에서는 single-process 추가
+            if is_docker:
+                launch_args.append('--single-process')
+                print("🐳 Docker 환경 감지됨")
+            
+            self.browser = await self.playwright.chromium.launch(
+                headless=True,
+                args=launch_args
+            )
+            
+            # 브라우저 컨텍스트 생성
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                locale='ko-KR',
+            )
+            
+            self._initialized = True
+            print("✅ Playwright 브라우저 초기화 완료")
+            
+        except Exception as e:
+            print(f"❌ Playwright 초기화 실패: {e}")
+            # 리소스 정리
+            await self._cleanup()
+            raise
         
-        # 브라우저 컨텍스트 생성 (모바일 에뮬레이션 대신 데스크톱)
-        self.context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            locale='ko-KR',
-        )
+    async def _cleanup(self):
+        """리소스 정리 (내부용)"""
+        if self.context:
+            try:
+                await self.context.close()
+            except:
+                pass
+            self.context = None
+            
+        if self.browser:
+            try:
+                await self.browser.close()
+            except:
+                pass
+            self.browser = None
+            
+        if self.playwright:
+            try:
+                await self.playwright.stop()
+            except:
+                pass
+            self.playwright = None
+            
+        self._initialized = False
         
     async def close(self):
         """브라우저 리소스 정리"""
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+        print("🔧 Playwright 브라우저 종료 중...")
+        await self._cleanup()
+        print("✅ Playwright 브라우저 종료 완료")
             
     async def _create_stealth_page(self) -> Page:
         """Stealth 모드가 적용된 페이지 생성"""
@@ -76,6 +124,10 @@ class IdusScraper:
         Returns:
             ProductData: 크롤링된 상품 데이터
         """
+        # 초기화 확인
+        if not self._initialized:
+            await self.initialize()
+            
         page = await self._create_stealth_page()
         
         try:
@@ -366,4 +418,3 @@ if __name__ == "__main__":
             await scraper.close()
     
     asyncio.run(test())
-

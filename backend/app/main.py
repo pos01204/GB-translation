@@ -24,15 +24,17 @@ load_dotenv()
 # 전역 인스턴스
 scraper: IdusScraper | None = None
 translator: ProductTranslator | None = None
+is_initialized: bool = False
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """앱 라이프사이클 관리 - 시작/종료 시 리소스 관리"""
-    global scraper, translator
+async def initialize_services():
+    """서비스 초기화 (지연 초기화)"""
+    global scraper, translator, is_initialized
     
-    # 시작 시 초기화
-    print("🚀 서버 시작 - 리소스 초기화 중...")
+    if is_initialized:
+        return
+    
+    print("🔧 서비스 초기화 중...")
     
     # Gemini API 키 확인
     gemini_api_key = os.getenv("GEMINI_API_KEY")
@@ -41,18 +43,40 @@ async def lifespan(app: FastAPI):
     else:
         print("✅ Gemini API 키 확인됨")
     
-    scraper = IdusScraper()
+    # Translator는 항상 초기화 (API 키 없어도 가능)
     translator = ProductTranslator(api_key=gemini_api_key)
     
-    await scraper.initialize()
-    print("✅ Playwright 브라우저 초기화 완료")
+    # Scraper 초기화 시도 (실패해도 서버는 시작)
+    try:
+        scraper = IdusScraper()
+        await scraper.initialize()
+        print("✅ Playwright 브라우저 초기화 완료")
+    except Exception as e:
+        print(f"⚠️ Playwright 초기화 실패 (크롤링 기능 제한됨): {e}")
+        scraper = None
+    
+    is_initialized = True
+    print("✅ 서비스 초기화 완료")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """앱 라이프사이클 관리 - 시작/종료 시 리소스 관리"""
+    global scraper
+    
+    # 시작 시 - 헬스체크용 최소 초기화만 수행
+    print("🚀 서버 시작...")
+    print(f"📍 PORT: {os.getenv('PORT', '8000')}")
     
     yield
     
     # 종료 시 정리
     print("🛑 서버 종료 - 리소스 정리 중...")
     if scraper:
-        await scraper.close()
+        try:
+            await scraper.close()
+        except Exception as e:
+            print(f"⚠️ 리소스 정리 중 오류: {e}")
     print("✅ 리소스 정리 완료")
 
 
@@ -65,22 +89,40 @@ app = FastAPI(
 )
 
 # CORS 설정 (프론트엔드 접근 허용)
+# 와일드카드 패턴은 작동하지 않으므로 명시적으로 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",  # 로컬 개발
-        "https://*.vercel.app",   # Vercel 배포
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        # Vercel 배포 URL들 (실제 배포 후 추가)
+        "https://gb-translation.vercel.app",
+        "https://gb-translation-git-main.vercel.app",
+        "https://gb-translation-pos01204.vercel.app",
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",  # Vercel 서브도메인 허용
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+@app.get("/", tags=["Root"])
+async def root():
+    """루트 엔드포인트 - API 정보"""
+    return {
+        "name": "Idus Product Translator API",
+        "version": "1.1.0",
+        "status": "running",
+        "docs": "/docs",
+    }
+
+
 @app.get("/api/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """
     서버 상태 확인 엔드포인트
+    Railway 헬스체크용 - 항상 즉시 응답
     """
     return HealthResponse(
         status="healthy",
@@ -99,8 +141,14 @@ async def scrape_product(request: ScrapeRequest):
     """
     global scraper
     
+    # 지연 초기화
+    await initialize_services()
+    
     if not scraper:
-        raise HTTPException(status_code=500, detail="스크래퍼가 초기화되지 않았습니다.")
+        raise HTTPException(
+            status_code=503, 
+            detail="스크래퍼가 초기화되지 않았습니다. 잠시 후 다시 시도해주세요."
+        )
     
     # URL 유효성 검사
     if "idus.com" not in request.url:
@@ -138,8 +186,14 @@ async def translate_product(request: TranslateRequest):
     """
     global translator
     
+    # 지연 초기화
+    await initialize_services()
+    
     if not translator:
-        raise HTTPException(status_code=500, detail="번역기가 초기화되지 않았습니다.")
+        raise HTTPException(
+            status_code=503, 
+            detail="번역기가 초기화되지 않았습니다. 잠시 후 다시 시도해주세요."
+        )
     
     try:
         translated_data = await translator.translate_product(
@@ -171,8 +225,14 @@ async def scrape_and_translate(url: str, target_language: str = "en"):
     """
     global scraper, translator
     
+    # 지연 초기화
+    await initialize_services()
+    
     if not scraper or not translator:
-        raise HTTPException(status_code=500, detail="서비스가 초기화되지 않았습니다.")
+        raise HTTPException(
+            status_code=503, 
+            detail="서비스가 초기화되지 않았습니다. 잠시 후 다시 시도해주세요."
+        )
     
     # URL 유효성 검사
     if "idus.com" not in url:
@@ -211,9 +271,10 @@ async def scrape_and_translate(url: str, target_language: str = "en"):
 # 개발용 실행
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.getenv("PORT", "8000"))
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=port,
         reload=True
     )
