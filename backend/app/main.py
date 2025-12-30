@@ -6,6 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 from .models import (
@@ -88,22 +89,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS 설정 (프론트엔드 접근 허용)
-# 와일드카드 패턴은 작동하지 않으므로 명시적으로 설정
+# CORS 설정 - 모든 오리진 허용 (프로덕션에서는 제한 권장)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        # Vercel 배포 URL들 (실제 배포 후 추가)
-        "https://gb-translation.vercel.app",
-        "https://gb-translation-git-main.vercel.app",
-        "https://gb-translation-pos01204.vercel.app",
-    ],
-    allow_origin_regex=r"https://.*\.vercel\.app",  # Vercel 서브도메인 허용
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"],  # 모든 오리진 허용
+    allow_credentials=False,  # credentials와 * 는 함께 사용 불가
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 
@@ -130,6 +123,19 @@ async def health_check():
     )
 
 
+@app.options("/api/scrape")
+async def scrape_options():
+    """CORS preflight 요청 처리"""
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+
 @app.post("/api/scrape", response_model=ScrapeResponse, tags=["Scraping"])
 async def scrape_product(request: ScrapeRequest):
     """
@@ -145,16 +151,18 @@ async def scrape_product(request: ScrapeRequest):
     await initialize_services()
     
     if not scraper:
-        raise HTTPException(
-            status_code=503, 
-            detail="스크래퍼가 초기화되지 않았습니다. 잠시 후 다시 시도해주세요."
+        return ScrapeResponse(
+            success=False,
+            message="스크래퍼가 초기화되지 않았습니다. 서버 로그를 확인해주세요.",
+            data=None
         )
     
     # URL 유효성 검사
     if "idus.com" not in request.url:
-        raise HTTPException(
-            status_code=400, 
-            detail="유효한 아이디어스 URL이 아닙니다."
+        return ScrapeResponse(
+            success=False,
+            message="유효한 아이디어스 URL이 아닙니다.",
+            data=None
         )
     
     try:
@@ -167,11 +175,25 @@ async def scrape_product(request: ScrapeRequest):
         )
         
     except Exception as e:
+        print(f"❌ 크롤링 오류: {e}")
         return ScrapeResponse(
             success=False,
             message=f"크롤링 중 오류 발생: {str(e)}",
             data=None
         )
+
+
+@app.options("/api/translate")
+async def translate_options():
+    """CORS preflight 요청 처리"""
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 
 @app.post("/api/translate", response_model=TranslateResponse, tags=["Translation"])
@@ -190,9 +212,10 @@ async def translate_product(request: TranslateRequest):
     await initialize_services()
     
     if not translator:
-        raise HTTPException(
-            status_code=503, 
-            detail="번역기가 초기화되지 않았습니다. 잠시 후 다시 시도해주세요."
+        return TranslateResponse(
+            success=False,
+            message="번역기가 초기화되지 않았습니다.",
+            data=None
         )
     
     try:
@@ -208,11 +231,25 @@ async def translate_product(request: TranslateRequest):
         )
         
     except Exception as e:
+        print(f"❌ 번역 오류: {e}")
         return TranslateResponse(
             success=False,
             message=f"번역 중 오류 발생: {str(e)}",
             data=None
         )
+
+
+@app.options("/api/scrape-and-translate")
+async def scrape_and_translate_options():
+    """CORS preflight 요청 처리"""
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 
 @app.post("/api/scrape-and-translate", response_model=TranslateResponse, tags=["Combined"])
@@ -228,31 +265,44 @@ async def scrape_and_translate(url: str, target_language: str = "en"):
     # 지연 초기화
     await initialize_services()
     
-    if not scraper or not translator:
-        raise HTTPException(
-            status_code=503, 
-            detail="서비스가 초기화되지 않았습니다. 잠시 후 다시 시도해주세요."
+    if not scraper:
+        return TranslateResponse(
+            success=False,
+            message="스크래퍼가 초기화되지 않았습니다. 서버 로그를 확인해주세요.",
+            data=None
+        )
+    
+    if not translator:
+        return TranslateResponse(
+            success=False,
+            message="번역기가 초기화되지 않았습니다.",
+            data=None
         )
     
     # URL 유효성 검사
     if "idus.com" not in url:
-        raise HTTPException(
-            status_code=400, 
-            detail="유효한 아이디어스 URL이 아닙니다."
+        return TranslateResponse(
+            success=False,
+            message="유효한 아이디어스 URL이 아닙니다.",
+            data=None
         )
     
     try:
         # 1. 크롤링
+        print(f"📥 크롤링 시작: {url}")
         product_data = await scraper.scrape_product(url)
+        print(f"✅ 크롤링 완료: {product_data.title}")
         
         # 2. 번역
         from .models import TargetLanguage
         lang = TargetLanguage.ENGLISH if target_language == "en" else TargetLanguage.JAPANESE
         
+        print(f"🌐 번역 시작: {lang.value}")
         translated_data = await translator.translate_product(
             product_data=product_data,
             target_language=lang
         )
+        print("✅ 번역 완료")
         
         return TranslateResponse(
             success=True,
@@ -261,6 +311,9 @@ async def scrape_and_translate(url: str, target_language: str = "en"):
         )
         
     except Exception as e:
+        print(f"❌ 처리 오류: {e}")
+        import traceback
+        traceback.print_exc()
         return TranslateResponse(
             success=False,
             message=f"처리 중 오류 발생: {str(e)}",

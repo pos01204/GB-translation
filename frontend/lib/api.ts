@@ -4,6 +4,11 @@
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+// Debug: API URL 확인
+if (typeof window !== 'undefined') {
+  console.log('🔗 API Base URL:', API_BASE_URL)
+}
+
 // ============ Types ============
 
 export type TargetLanguage = 'en' | 'ja'
@@ -62,10 +67,17 @@ export interface HealthResponse {
  * API 헬스체크
  */
 export async function checkHealth(): Promise<HealthResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/health`)
+  console.log('🏥 Health check:', `${API_BASE_URL}/api/health`)
+  
+  const response = await fetch(`${API_BASE_URL}/api/health`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json',
+    },
+  })
   
   if (!response.ok) {
-    throw new Error('서버에 연결할 수 없습니다.')
+    throw new Error(`서버에 연결할 수 없습니다. (${response.status})`)
   }
   
   return response.json()
@@ -75,20 +87,28 @@ export async function checkHealth(): Promise<HealthResponse> {
  * 상품 페이지 크롤링
  */
 export async function scrapeProduct(url: string): Promise<ScrapeResponse> {
+  console.log('🔍 Scrape request:', `${API_BASE_URL}/api/scrape`)
+  
   const response = await fetch(`${API_BASE_URL}/api/scrape`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
     },
     body: JSON.stringify({ url }),
   })
 
+  console.log('📥 Scrape response status:', response.status)
+
   if (!response.ok) {
     const error = await response.json().catch(() => ({}))
-    throw new Error(error.detail || '크롤링 요청에 실패했습니다.')
+    console.error('❌ Scrape error:', error)
+    throw new Error(error.detail || error.message || `크롤링 요청에 실패했습니다. (${response.status})`)
   }
 
-  return response.json()
+  const data = await response.json()
+  console.log('✅ Scrape success:', data.success)
+  return data
 }
 
 /**
@@ -98,10 +118,13 @@ export async function translateProduct(
   productData: ProductData,
   targetLanguage: TargetLanguage
 ): Promise<TranslateResponse> {
+  console.log('🌐 Translate request:', `${API_BASE_URL}/api/translate`)
+  
   const response = await fetch(`${API_BASE_URL}/api/translate`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
     },
     body: JSON.stringify({
       product_data: productData,
@@ -109,12 +132,17 @@ export async function translateProduct(
     }),
   })
 
+  console.log('📥 Translate response status:', response.status)
+
   if (!response.ok) {
     const error = await response.json().catch(() => ({}))
-    throw new Error(error.detail || '번역 요청에 실패했습니다.')
+    console.error('❌ Translate error:', error)
+    throw new Error(error.detail || error.message || `번역 요청에 실패했습니다. (${response.status})`)
   }
 
-  return response.json()
+  const data = await response.json()
+  console.log('✅ Translate success:', data.success)
+  return data
 }
 
 /**
@@ -124,19 +152,33 @@ export async function scrapeAndTranslate(
   url: string,
   targetLanguage: TargetLanguage
 ): Promise<TranslateResponse> {
-  const response = await fetch(
-    `${API_BASE_URL}/api/scrape-and-translate?url=${encodeURIComponent(url)}&target_language=${targetLanguage}`,
-    {
-      method: 'POST',
-    }
-  )
+  const endpoint = `${API_BASE_URL}/api/scrape-and-translate?url=${encodeURIComponent(url)}&target_language=${targetLanguage}`
+  console.log('🚀 Scrape & Translate request:', endpoint)
+  
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+    },
+  })
+
+  console.log('📥 Response status:', response.status)
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}))
-    throw new Error(error.detail || '처리 요청에 실패했습니다.')
+    console.error('❌ Error:', error)
+    throw new Error(error.detail || error.message || `처리 요청에 실패했습니다. (${response.status})`)
   }
 
-  return response.json()
+  const data = await response.json()
+  console.log('✅ Success:', data.success, data.message)
+  
+  // API가 성공했지만 data.success가 false인 경우 처리
+  if (!data.success) {
+    throw new Error(data.message || '처리에 실패했습니다.')
+  }
+  
+  return data
 }
 
 // ============ Utility Functions ============
@@ -150,4 +192,3 @@ export function getErrorMessage(error: unknown): string {
   }
   return '알 수 없는 오류가 발생했습니다.'
 }
-
