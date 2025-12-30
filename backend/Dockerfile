@@ -1,7 +1,7 @@
 # Railway 배포용 Dockerfile
 # Playwright + Chromium이 포함된 Python 환경
 
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # 환경 변수 설정
 ENV PYTHONUNBUFFERED=1 \
@@ -37,10 +37,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     libasound2 \
     libxshmfence1 \
-    # 폰트 (한글 지원)
+    # 폰트 (한글 지원) - fonts-nanum만 사용 (다른 패키지 포함됨)
     fonts-nanum \
-    fonts-nanum-coding \
-    fonts-nanum-extra \
     # 정리
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -68,4 +66,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # 서버 실행
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
