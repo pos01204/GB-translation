@@ -450,18 +450,85 @@ class IdusScraper:
         """
         results: list[ProductOption] = []
 
-        # 0) Idus에서 자주 보이는 트리거: "옵션을 선택해주세요." 텍스트 영역을 먼저 클릭 시도
+        # 0) Idus에서 자주 보이는 트리거: "옵션을 선택해주세요" 영역을 먼저 클릭 시도
         try:
-            hint = await page.query_selector('text="옵션을 선택해주세요."')
+            hint = await page.query_selector('text=/옵션을\\s*선택해주세요/i')
             if hint:
                 clickable = await hint.evaluate_handle(
                     """(el) => el.closest('button,[role="button"],[role="combobox"],div')"""
                 )
                 try:
+                    try:
+                        await clickable.scroll_into_view_if_needed()
+                    except:
+                        pass
                     await clickable.click()
                     await asyncio.sleep(0.6)
                 except:
                     pass
+        except:
+            pass
+
+        # 0.5) 옵션 그룹 라벨(예: "1. 쿠키 선택")이 페이지에 있으면 직접 클릭해 리스트를 띄우는 경로를 우선 시도
+        try:
+            group_labels = await page.query_selector_all("text=/^\\s*\\d+\\./")
+            for gl in group_labels[:5]:
+                try:
+                    await gl.scroll_into_view_if_needed()
+                except:
+                    pass
+                try:
+                    await gl.click()
+                    await asyncio.sleep(0.6)
+                except:
+                    continue
+
+                # dialog/listbox가 뜨면 role=option을 수집하고 종료
+                try:
+                    await page.wait_for_selector('[role="option"], [role="listbox"], [role="dialog"]', timeout=2000)
+                except:
+                    pass
+                # 실제 option 텍스트 수집 (dialog 우선)
+                scope = None
+                for scope_sel in ['[role="dialog"]', '[class*="modal"]', '[class*="sheet"]', '[class*="bottom"]']:
+                    try:
+                        el = await page.query_selector(scope_sel)
+                        if el:
+                            scope = el
+                            break
+                    except:
+                        continue
+                search_root = scope if scope else page
+                option_els = await search_root.query_selector_all('[role="option"], li[role="option"], li, button')
+                values: list[str] = []
+                for opt in option_els[:120]:
+                    try:
+                        t = ((await opt.inner_text()) or "").strip()
+                        if not t:
+                            continue
+                        if t in ("선택", "선택하세요", "옵션 선택", "장바구니", "구매하기", "선물하기"):
+                            continue
+                        if "옵션을 선택해주세요" in t:
+                            continue
+                        if "\n" in t:
+                            t = t.split("\n")[0].strip()
+                        if 1 <= len(t) <= 120:
+                            values.append(t)
+                    except:
+                        continue
+                values = list(dict.fromkeys(values))
+                try:
+                    await page.keyboard.press("Escape")
+                except:
+                    pass
+
+                if values:
+                    # "1. 쿠키 선택" -> "쿠키 선택"
+                    group_name = ((await gl.inner_text()) or "").strip()
+                    group_name = re.sub(r"^\\s*\\d+\\.", "", group_name).strip() or "옵션"
+                    results.append(ProductOption(name=group_name, values=values))
+                    # 직접 경로로 성공했으면 추가 탐색은 생략
+                    return results
         except:
             pass
 
@@ -645,9 +712,12 @@ class IdusScraper:
             except:
                 continue
 
-        # 2) 스크롤로 지연 로딩 유도 (끝까지 적응형 스크롤)
+        # 2) 스크롤로 지연 로딩 유도
+        # NOTE: Idus 상세 이미지는 "뷰포트에 들어와야" 로딩되는 케이스가 많아서
+        #       scrollTo(bottom) 점프 방식은 오히려 누락을 만들 수 있음.
+        #       진행형(프로그레시브) 스크롤로 중간 구간도 실제로 통과시킵니다.
         try:
-            await self._auto_scroll_to_bottom(page, max_loops=30, pause_sec=0.35)
+            await self._progressive_scroll_to_bottom(page, max_steps=35, pause_sec=0.45)
         except:
             pass
 
@@ -686,6 +756,49 @@ class IdusScraper:
         # 상단으로 살짝 복귀
         try:
             await page.evaluate("window.scrollBy(0, -600);")
+        except:
+            pass
+
+    async def _progressive_scroll_to_bottom(self, page: Page, max_steps: int = 35, pause_sec: float = 0.45) -> None:
+        """
+        진행형 스크롤: viewport 단위로 내려가며 lazy-load 트리거를 최대한 살림.
+        - 중간 구간을 실제로 통과시키지 않으면 로딩되지 않는 이미지들이 많음
+        """
+        stable = 0
+        last_h = 0
+        for _ in range(max_steps):
+            metrics = await page.evaluate(
+                """() => ({
+                  y: window.scrollY,
+                  vh: window.innerHeight,
+                  h: document.body.scrollHeight
+                })"""
+            )
+            h = int(metrics.get("h", 0) or 0)
+            vh = int(metrics.get("vh", 900) or 900)
+            y = int(metrics.get("y", 0) or 0)
+
+            if h == last_h:
+                stable += 1
+            else:
+                stable = 0
+                last_h = h
+
+            # 거의 끝이면 종료
+            if y + vh >= h - 80:
+                break
+
+            step = int(vh * 0.9)
+            await page.evaluate("(s) => window.scrollBy(0, s)", step)
+            await asyncio.sleep(pause_sec)
+
+            # 높이 변화가 없고 충분히 내려왔으면 종료
+            if stable >= 5 and y + vh >= h * 0.8:
+                break
+
+        # 마지막에 살짝 위로 (sticky UI 영향 완화)
+        try:
+            await page.evaluate("window.scrollBy(0, -500);")
         except:
             pass
 
@@ -987,7 +1100,8 @@ class IdusScraper:
 
         # 상세 이미지는 스크롤해야 늦게 로딩되는 경우가 많음
         try:
-            await self._auto_scroll_to_bottom(page, max_loops=30, pause_sec=0.3)
+            # 점프 스크롤은 중간 구간 lazy-load를 놓칠 수 있어 진행형 스크롤을 사용
+            await self._progressive_scroll_to_bottom(page, max_steps=45, pause_sec=0.4)
         except:
             pass
         
