@@ -1,12 +1,16 @@
 """
 Google Gemini 기반 번역 및 OCR 모듈
+새로운 google-genai 라이브러리 사용
 """
 import base64
 import httpx
 import os
 import traceback
 from typing import Optional
-import google.generativeai as genai
+
+# 새로운 google-genai 라이브러리
+from google import genai
+from google.genai import types
 
 from .models import (
     ProductData,
@@ -20,70 +24,59 @@ from .models import (
 class ProductTranslator:
     """Google Gemini를 사용한 상품 번역기"""
     
-    # 시도할 모델 이름 목록 (다양한 형식)
-    MODEL_CANDIDATES = [
-        'models/gemini-1.5-flash',
-        'models/gemini-1.5-pro', 
-        'models/gemini-pro',
-        'gemini-1.5-flash',
-        'gemini-1.5-pro',
-        'gemini-pro',
-        'models/gemini-1.0-pro',
-        'gemini-1.0-pro',
-    ]
-    
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key
-        self.model = None
-        self.vision_model = None
+        self.client = None
         self._initialized = False
         self._model_name = None
         
         if api_key:
-            self._initialize_models(api_key)
+            self._initialize_client(api_key)
         else:
             print("⚠️ GEMINI_API_KEY가 설정되지 않았습니다")
     
-    def _initialize_models(self, api_key: str):
-        """Gemini 모델 초기화 - 여러 모델 이름 형식 시도"""
+    def _initialize_client(self, api_key: str):
+        """Gemini 클라이언트 초기화"""
         try:
             print(f"🔧 Gemini API 초기화 중... (키 길이: {len(api_key)})")
-            genai.configure(api_key=api_key)
             
-            # 각 모델 후보를 시도
-            for model_name in self.MODEL_CANDIDATES:
+            # 새로운 방식: Client 생성
+            self.client = genai.Client(api_key=api_key)
+            
+            # 사용 가능한 모델 목록 확인 및 테스트
+            model_candidates = [
+                "gemini-2.0-flash",
+                "gemini-2.0-flash-exp", 
+                "gemini-1.5-flash",
+                "gemini-1.5-pro",
+                "gemini-pro",
+            ]
+            
+            for model_name in model_candidates:
                 try:
                     print(f"🔄 모델 시도: {model_name}")
-                    test_model = genai.GenerativeModel(model_name)
                     
-                    # 간단한 테스트 호출
-                    test_response = test_model.generate_content(
-                        "Say 'OK'",
-                        generation_config={"max_output_tokens": 10}
+                    # 테스트 호출
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents="Say OK"
                     )
                     
-                    if test_response and test_response.text:
+                    if response and response.text:
                         self._model_name = model_name
-                        self.model = test_model
-                        self.vision_model = genai.GenerativeModel(model_name)
                         self._initialized = True
                         print(f"✅ 모델 선택 성공: {model_name}")
                         return
                         
                 except Exception as e:
-                    error_msg = str(e)
-                    if "404" in error_msg:
-                        print(f"   ⚠️ {model_name}: 모델 없음")
-                    elif "API_KEY" in error_msg or "401" in error_msg or "403" in error_msg:
-                        print(f"   ❌ API 키 오류: {e}")
-                        break  # API 키 문제면 다른 모델도 안됨
+                    error_str = str(e)
+                    if "404" in error_str or "not found" in error_str.lower():
+                        print(f"   ⚠️ {model_name}: 사용 불가")
                     else:
                         print(f"   ⚠️ {model_name}: {e}")
                     continue
             
-            if not self._initialized:
-                print("❌ 사용 가능한 모델을 찾을 수 없습니다")
-                print("   API 키를 확인해주세요: https://aistudio.google.com/app/apikey")
+            print("❌ 사용 가능한 모델을 찾을 수 없습니다")
             
         except Exception as e:
             print(f"❌ Gemini 초기화 실패: {e}")
@@ -106,8 +99,7 @@ class ProductTranslator:
         print(f"🔄 번역 시작 (모델: {self._model_name}, 초기화: {self._initialized})")
         print(f"{'='*50}")
         
-        # 모델이 초기화되지 않았으면 원본 반환
-        if not self._initialized or not self.model:
+        if not self._initialized or not self.client:
             print("⚠️ 모델 미초기화 - 원본 데이터 반환")
             return TranslatedProduct(
                 original=product_data,
@@ -120,19 +112,19 @@ class ProductTranslator:
         
         # 1. 제목 번역
         print(f"📝 제목 번역: {product_data.title[:30]}...")
-        translated_title = self._translate_sync(
+        translated_title = self._translate_text(
             product_data.title, target_language, "상품명"
         )
         
         # 2. 설명 번역
         print(f"📝 설명 번역: {len(product_data.description)}자")
-        translated_description = self._translate_sync(
+        translated_description = self._translate_text(
             product_data.description, target_language, "상품 설명"
         )
         
         # 3. 옵션 번역
         print(f"📝 옵션 번역: {len(product_data.options)}개")
-        translated_options = self._translate_options_sync(
+        translated_options = self._translate_options(
             product_data.options, target_language
         )
         
@@ -153,8 +145,8 @@ class ProductTranslator:
             target_language=target_language
         )
     
-    def _translate_sync(self, text: str, target_language: TargetLanguage, context: str = "") -> str:
-        """동기 방식 텍스트 번역"""
+    def _translate_text(self, text: str, target_language: TargetLanguage, context: str = "") -> str:
+        """텍스트 번역"""
         if not text or not text.strip():
             return text
         if text in ["제목 없음", "설명 없음", "가격 정보 없음", "작가명 없음"]:
@@ -169,9 +161,13 @@ Korean: {text}
 {lang}:"""
 
         try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.2, "max_output_tokens": 4000}
+            response = self.client.models.generate_content(
+                model=self._model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=4000,
+                )
             )
             
             if response and response.text:
@@ -189,15 +185,15 @@ Korean: {text}
             print(f"   ❌ 번역 실패: {e}")
             return text
     
-    def _translate_options_sync(
+    def _translate_options(
         self, options: list[ProductOption], target_language: TargetLanguage
     ) -> list[ProductOption]:
         """옵션 번역"""
         result = []
         for opt in options:
             try:
-                name = self._translate_sync(opt.name, target_language, "옵션명")
-                values = [self._translate_sync(v, target_language, "옵션값") for v in opt.values]
+                name = self._translate_text(opt.name, target_language, "옵션명")
+                values = [self._translate_text(v, target_language, "옵션값") for v in opt.values]
                 result.append(ProductOption(name=name, values=values))
             except:
                 result.append(opt)
@@ -217,7 +213,7 @@ Korean: {text}
                 
                 if ocr_text and len(ocr_text) > 10:
                     print(f"      ✅ 텍스트 발견: {len(ocr_text)}자")
-                    translated = self._translate_sync(ocr_text, target_language, "이미지 텍스트")
+                    translated = self._translate_text(ocr_text, target_language, "이미지 텍스트")
                     results.append(ImageText(
                         image_url=url,
                         original_text=ocr_text,
@@ -232,7 +228,7 @@ Korean: {text}
     
     async def _ocr_image(self, image_url: str) -> Optional[str]:
         """이미지 OCR"""
-        if not self.vision_model:
+        if not self.client or not self._model_name:
             return None
         
         try:
@@ -249,12 +245,19 @@ Korean: {text}
             elif "webp" in ct: mime = "image/webp"
             elif "gif" in ct: mime = "image/gif"
             
-            b64 = base64.b64encode(image_data).decode()
+            # 새로운 방식: Part 객체 사용
+            image_part = types.Part.from_bytes(
+                data=image_data,
+                mime_type=mime
+            )
             
-            response = self.vision_model.generate_content([
-                "이 이미지에서 한국어 텍스트만 추출해주세요. 텍스트가 없으면 NO_TEXT만 응답하세요.",
-                {"mime_type": mime, "data": b64}
-            ])
+            response = self.client.models.generate_content(
+                model=self._model_name,
+                contents=[
+                    "이 이미지에서 한국어 텍스트만 추출해주세요. 텍스트가 없으면 NO_TEXT만 응답하세요.",
+                    image_part
+                ]
+            )
             
             if response and response.text:
                 text = response.text.strip()
@@ -269,4 +272,4 @@ Korean: {text}
             return None
     
     async def translate_single_text(self, text: str, target_language: TargetLanguage) -> str:
-        return self._translate_sync(text, target_language, "텍스트")
+        return self._translate_text(text, target_language, "텍스트")

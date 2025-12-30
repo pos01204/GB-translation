@@ -6,8 +6,8 @@ uvicorn[standard]==0.27.0
 playwright==1.41.0
 playwright-stealth==1.0.6
 
-# Google Gemini API
-google-generativeai>=0.8.0
+# Google Gemini API (새로운 라이브러리)
+google-genai>=1.0.0
 
 # HTTP 클라이언트
 httpx==0.26.0
