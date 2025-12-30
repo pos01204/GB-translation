@@ -2,11 +2,31 @@
  * Backend API 클라이언트
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+// API URL 설정 - https:// 프로토콜 보장
+function getApiBaseUrl(): string {
+  const envUrl = process.env.NEXT_PUBLIC_API_URL || ''
+  
+  // 환경 변수가 없으면 localhost 사용
+  if (!envUrl) {
+    return 'http://localhost:8000'
+  }
+  
+  // 이미 프로토콜이 있으면 그대로 사용
+  if (envUrl.startsWith('http://') || envUrl.startsWith('https://')) {
+    // 끝에 슬래시 제거
+    return envUrl.replace(/\/$/, '')
+  }
+  
+  // 프로토콜이 없으면 https:// 추가
+  return `https://${envUrl}`.replace(/\/$/, '')
+}
+
+const API_BASE_URL = getApiBaseUrl()
 
 // Debug: API URL 확인
 if (typeof window !== 'undefined') {
   console.log('🔗 API Base URL:', API_BASE_URL)
+  console.log('🔗 ENV value:', process.env.NEXT_PUBLIC_API_URL)
 }
 
 // ============ Types ============
