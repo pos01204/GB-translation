@@ -10,7 +10,7 @@ git add .
 git status
 echo.
 echo Committing changes...
-git commit -m "fix: Complete rewrite of translator with better error handling, improve description extraction"
+git commit -m "fix: Use generate_content_async for translation, add detailed logging"
 echo.
 echo Pushing to remote...
 git push

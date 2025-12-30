@@ -35,29 +35,42 @@ async def initialize_services():
     if is_initialized:
         return
     
-    print("🔧 서비스 초기화 중...")
+    print("\n" + "="*60)
+    print("🔧 서비스 초기화 시작")
+    print("="*60)
     
     # Gemini API 키 확인
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
-        print("⚠️ 경고: GEMINI_API_KEY가 설정되지 않았습니다.")
+        print("❌ GEMINI_API_KEY 환경변수가 설정되지 않았습니다!")
+        print("   Railway 대시보드에서 환경변수를 설정해주세요.")
     else:
-        print("✅ Gemini API 키 확인됨")
+        # API 키 일부만 표시 (보안)
+        masked_key = gemini_api_key[:8] + "..." + gemini_api_key[-4:] if len(gemini_api_key) > 12 else "***"
+        print(f"✅ Gemini API 키 확인됨: {masked_key}")
     
-    # Translator는 항상 초기화 (API 키 없어도 가능)
+    # Translator 초기화
+    print("\n📌 Translator 초기화...")
     translator = ProductTranslator(api_key=gemini_api_key)
+    if translator._initialized:
+        print(f"✅ Translator 초기화 성공 (모델: {translator._model_name})")
+    else:
+        print("❌ Translator 초기화 실패 - 번역 기능이 작동하지 않습니다")
     
-    # Scraper 초기화 시도 (실패해도 서버는 시작)
+    # Scraper 초기화
+    print("\n📌 Scraper 초기화...")
     try:
         scraper = IdusScraper()
         await scraper.initialize()
         print("✅ Playwright 브라우저 초기화 완료")
     except Exception as e:
-        print(f"⚠️ Playwright 초기화 실패 (크롤링 기능 제한됨): {e}")
+        print(f"❌ Playwright 초기화 실패: {e}")
         scraper = None
     
     is_initialized = True
+    print("\n" + "="*60)
     print("✅ 서비스 초기화 완료")
+    print("="*60 + "\n")
 
 
 @asynccontextmanager
