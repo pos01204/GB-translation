@@ -172,6 +172,18 @@ class IdusScraper:
                 nd_images = next_data.get("detail_images") or []
                 if nd_images:
                     detail_images = nd_images
+                # next_data에서 옵션을 못 찾았으면(혹은 빈 값이면) 인터랙티브 방식으로 한 번 더 시도
+                if not options:
+                    try:
+                        options = await self._extract_options_interactive(page)
+                    except Exception as e:
+                        print(f"⚠️ 인터랙티브 옵션 추출 실패: {e}")
+                # 이미지가 너무 적으면(누락 가능성 높음) 확장 수집
+                if detail_images and len(detail_images) < 8:
+                    try:
+                        detail_images = list(dict.fromkeys(detail_images + (await self._extract_detail_images(page))))
+                    except:
+                        pass
             
             print(f"✅ 크롤링 완료: {title}")
             
@@ -303,12 +315,26 @@ class IdusScraper:
                         lk = {kk.lower() for kk in el.keys()}
                         if "name" in lk and ("values" in lk or "value" in lk or "items" in lk):
                             option_objs.append(el)
+                        # Idus에서 자주 보이는 형태: optionName + optionValues
+                        if ("optionname" in lk or "label" in lk or "title" in lk) and (
+                            "optionvalues" in lk or "values" in lk or "items" in lk
+                        ):
+                            option_objs.append(el)
+
+        # dict 단독으로도 option group이 들어오는 케이스가 있어 추가로 탐색
+        for path, k, v in items:
+            if isinstance(v, dict) and ("option" in k.lower() or "options" in k.lower()):
+                lk = {kk.lower() for kk in v.keys()}
+                if ("name" in lk or "optionname" in lk or "label" in lk or "title" in lk) and (
+                    "values" in lk or "items" in lk or "optionvalues" in lk
+                ):
+                    option_objs.append(v)
 
         parsed_options: list[ProductOption] = []
         for obj in option_objs[:20]:
             try:
-                name = (obj.get("name") or obj.get("title") or obj.get("label") or "").strip()
-                vals_raw = obj.get("values") or obj.get("items") or obj.get("value") or []
+                name = (obj.get("name") or obj.get("optionName") or obj.get("title") or obj.get("label") or "").strip()
+                vals_raw = obj.get("values") or obj.get("optionValues") or obj.get("items") or obj.get("value") or []
                 values: list[str] = []
                 if isinstance(vals_raw, list):
                     for it in vals_raw[:200]:
@@ -317,7 +343,7 @@ class IdusScraper:
                             if s:
                                 values.append(s)
                         elif isinstance(it, dict):
-                            s = (it.get("name") or it.get("label") or it.get("value") or "").strip()
+                            s = (it.get("name") or it.get("label") or it.get("value") or it.get("optionValue") or "").strip()
                             if s:
                                 values.append(s)
                 elif isinstance(vals_raw, str):
@@ -374,6 +400,127 @@ class IdusScraper:
         if detail_images:
             result["detail_images"] = detail_images
         return result
+
+    async def _extract_options_interactive(self, page: Page) -> list[ProductOption]:
+        """
+        DOM에서 옵션이 비어있는 경우를 대비해, 실제로 옵션 UI를 열어서(role=listbox/option)
+        화면에 표시되는 값을 수집하는 방식.
+        """
+        results: list[ProductOption] = []
+
+        # 구매 영역 근처의 트리거를 최대한 포괄
+        trigger_selectors = [
+            '[aria-haspopup="listbox"]',
+            '[role="combobox"]',
+            'button:has-text("옵션")',
+            'button:has-text("선택")',
+        ]
+
+        triggers: list[Any] = []
+        for sel in trigger_selectors:
+            try:
+                els = await page.query_selector_all(sel)
+                triggers.extend(els)
+            except:
+                continue
+
+        # 중복 트리거 제거 (bounding box + text 조합)
+        uniq: list[Any] = []
+        seen: set[str] = set()
+        for el in triggers:
+            try:
+                txt = ((await el.inner_text()) or "").strip()
+                box = await el.bounding_box()
+                key = f"{txt}|{int(box['x']) if box else -1}|{int(box['y']) if box else -1}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(el)
+            except:
+                continue
+
+        # 상위 몇 개만 시도 (너무 많으면 오탐)
+        uniq = uniq[:8]
+
+        for idx, trig in enumerate(uniq):
+            try:
+                # 옵션 그룹명 추정: 트리거 주변 텍스트에서 "1." 같은 라인을 우선
+                group_name = await trig.evaluate(
+                    """(el) => {
+                      const container = el.closest('section, article, div') || el.parentElement;
+                      const t = (container?.innerText || '').trim();
+                      const lines = t.split('\\n').map(s=>s.trim()).filter(Boolean);
+                      // "1. 쿠키 선택" 형태 우선
+                      const hit = lines.find(l => /^\\d+\\./.test(l) && l.length <= 50);
+                      if (hit) return hit.replace(/^\\d+\\./, '').trim();
+                      // 그 외에는 첫 줄 후보
+                      return (lines[0] || '').slice(0, 50);
+                    }"""
+                )
+                group_name = (group_name or "").strip() or f"옵션 {idx+1}"
+
+                # 클릭해서 옵션 노출
+                await trig.click()
+                await asyncio.sleep(0.5)
+
+                # 옵션 항목 후보들 수집
+                option_els = []
+                for opt_sel in ['[role="option"]', '[class*="dropdown"] li', '[class*="menu"] li', 'li']:
+                    try:
+                        option_els = await page.query_selector_all(opt_sel)
+                        if option_els and len(option_els) >= 2:
+                            break
+                    except:
+                        continue
+
+                values: list[str] = []
+                for opt in option_els[:60]:
+                    try:
+                        t = ((await opt.inner_text()) or "").strip()
+                        if not t:
+                            continue
+                        # UI/푸터/버튼 텍스트 등 노이즈 제거
+                        if t in ("선택", "선택하세요", "옵션 선택", "장바구니", "구매하기", "선물하기"):
+                            continue
+                        if len(t) > 120:
+                            continue
+                        # 너무 많은 줄이 섞이면 첫 줄만
+                        if "\n" in t:
+                            t = t.split("\n")[0].strip()
+                        values.append(t)
+                    except:
+                        continue
+
+                values = list(dict.fromkeys(values))
+
+                # 닫기 (ESC)
+                try:
+                    await page.keyboard.press("Escape")
+                except:
+                    pass
+                await asyncio.sleep(0.2)
+
+                if values:
+                    results.append(ProductOption(name=group_name, values=values))
+            except:
+                # 트리거 하나 실패해도 계속
+                try:
+                    await page.keyboard.press("Escape")
+                except:
+                    pass
+                continue
+
+        # 중복/빈값 정리
+        merged: dict[str, list[str]] = {}
+        for opt in results:
+            merged.setdefault(opt.name, [])
+            merged[opt.name].extend(opt.values)
+        out: list[ProductOption] = []
+        for name, vals in merged.items():
+            uniq_vals = list(dict.fromkeys([v for v in vals if v and v not in ("선택", "선택하세요")]))
+            if uniq_vals:
+                out.append(ProductOption(name=name, values=uniq_vals))
+        return out
 
     async def _prepare_dynamic_sections(self, page: Page) -> None:
         """
@@ -702,6 +849,7 @@ class IdusScraper:
             '[class*="product-info"] img',
             'article img',
             'img',
+            'source',
         ]
         
         for selector in detail_selectors:
@@ -709,25 +857,60 @@ class IdusScraper:
                 img_elements = await page.query_selector_all(selector)
                 
                 for img in img_elements:
-                    # src 또는 data-src 속성 추출
+                    # src 계열 추출 (lazy-load / srcset 포함)
                     src = await img.get_attribute('src')
                     if not src:
                         src = await img.get_attribute('data-src')
                     if not src:
                         src = await img.get_attribute('data-lazy-src')
+                    if not src:
+                        src = await img.get_attribute('data-original')
+                    if not src:
+                        src = await img.get_attribute('data-url')
+
+                    # srcset / data-srcset 처리
+                    srcset = await img.get_attribute('srcset')
+                    if not srcset:
+                        srcset = await img.get_attribute('data-srcset')
+                    if srcset:
+                        # srcset: "url1 320w, url2 640w" -> 가장 큰 것 선택
+                        try:
+                            parts = [p.strip() for p in srcset.split(",") if p.strip()]
+                            # width 기준 정렬
+                            scored = []
+                            for p in parts:
+                                seg = p.split()
+                                u = seg[0]
+                                w = 0
+                                if len(seg) >= 2 and seg[1].endswith("w"):
+                                    try:
+                                        w = int(seg[1].replace("w", ""))
+                                    except:
+                                        w = 0
+                                scored.append((w, u))
+                            scored.sort(key=lambda x: x[0], reverse=True)
+                            if scored:
+                                src = scored[0][1]
+                        except:
+                            pass
+
+                    # background-image(url(...)) 처리
+                    if not src:
+                        try:
+                            style = await img.get_attribute('style') or ""
+                            m = re.search(r'url\\([\"\\\']?(.*?)[\"\\\']?\\)', style)
+                            if m:
+                                src = m.group(1)
+                        except:
+                            pass
                     
                     if src:
                         # 유효한 이미지 URL인지 확인
                         if src.startswith('http') and not src.endswith('.svg'):
-                            # 작은 아이콘 제외 (최소 크기 체크)
-                            try:
-                                width = await img.get_attribute('width')
-                                height = await img.get_attribute('height')
-                                if width and height:
-                                    if int(width) < 100 or int(height) < 100:
-                                        continue
-                            except:
-                                pass
+                            # 너무 작은 썸네일/아이콘 URL 패턴 제외 (경험칙)
+                            low = src.lower()
+                            if any(x in low for x in ["sprite", "icon", "logo"]):
+                                continue
                             
                             if src not in images:
                                 images.append(src)
@@ -739,7 +922,7 @@ class IdusScraper:
         print(f"📷 {len(images)}개의 상세 이미지 발견")
         # 중복 제거/상위 N개 제한
         images = list(dict.fromkeys(images))
-        return images[:30]  # 최대 30개까지만
+        return images[:60]  # 최대 60개까지만
 
 
 # 테스트용 코드
