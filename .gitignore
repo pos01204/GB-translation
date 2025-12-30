@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Build outputs
+.next/
+out/
+build/
+dist/
+*.egg-info/
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Misc
+*.bak
+*.tmp
+*.temp
+
+# Playwright
+playwright-report/
+test-results/
+
+# Vercel
+.vercel
+
+# Railway
+.railway

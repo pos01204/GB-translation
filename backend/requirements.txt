@@ -1,0 +1,22 @@
+# FastAPI 프레임워크
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Playwright 크롤링
+playwright==1.41.0
+playwright-stealth==1.0.6
+
+# Google Gemini API
+google-generativeai==0.8.3
+
+# HTTP 클라이언트
+httpx==0.26.0
+
+# 환경 변수
+python-dotenv==1.0.0
+
+# 데이터 검증
+pydantic==2.5.3
+
+# CORS
+starlette==0.35.1
