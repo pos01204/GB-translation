@@ -5,9 +5,5 @@
   "outputDirectory": ".next",
   "installCommand": "npm install",
   "devCommand": "npm run dev",
-  "regions": ["icn1"],
-  "env": {
-    "NEXT_PUBLIC_API_URL": "@backend_api_url"
-  }
+  "regions": ["icn1"]
 }
-
