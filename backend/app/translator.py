@@ -20,6 +20,18 @@ from .models import (
 class ProductTranslator:
     """Google Gemini를 사용한 상품 번역기"""
     
+    # 시도할 모델 이름 목록 (다양한 형식)
+    MODEL_CANDIDATES = [
+        'models/gemini-1.5-flash',
+        'models/gemini-1.5-pro', 
+        'models/gemini-pro',
+        'gemini-1.5-flash',
+        'gemini-1.5-pro',
+        'gemini-pro',
+        'models/gemini-1.0-pro',
+        'gemini-1.0-pro',
+    ]
+    
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key
         self.model = None
@@ -33,61 +45,51 @@ class ProductTranslator:
             print("⚠️ GEMINI_API_KEY가 설정되지 않았습니다")
     
     def _initialize_models(self, api_key: str):
-        """Gemini 모델 초기화"""
+        """Gemini 모델 초기화 - 여러 모델 이름 형식 시도"""
         try:
             print(f"🔧 Gemini API 초기화 중... (키 길이: {len(api_key)})")
             genai.configure(api_key=api_key)
             
-            # 사용 가능한 모델 목록 확인
-            print("📋 사용 가능한 모델 확인 중...")
-            available_models = []
-            try:
-                for model in genai.list_models():
-                    if 'generateContent' in [m.name for m in model.supported_generation_methods]:
-                        available_models.append(model.name)
-                        print(f"   - {model.name}")
-            except Exception as e:
-                print(f"   모델 목록 조회 실패: {e}")
-            
-            # 모델 선택 (우선순위)
-            model_candidates = [
-                'gemini-pro',           # 가장 기본
-                'gemini-1.0-pro',       # 1.0 버전
-                'gemini-1.5-flash',     # 1.5 flash
-                'gemini-1.5-pro',       # 1.5 pro
-            ]
-            
-            self._model_name = None
-            for candidate in model_candidates:
+            # 각 모델 후보를 시도
+            for model_name in self.MODEL_CANDIDATES:
                 try:
-                    print(f"🔄 모델 시도: {candidate}")
-                    test_model = genai.GenerativeModel(candidate)
-                    # 간단한 테스트
-                    test_response = test_model.generate_content("Hello")
-                    if test_response:
-                        self._model_name = candidate
+                    print(f"🔄 모델 시도: {model_name}")
+                    test_model = genai.GenerativeModel(model_name)
+                    
+                    # 간단한 테스트 호출
+                    test_response = test_model.generate_content(
+                        "Say 'OK'",
+                        generation_config={"max_output_tokens": 10}
+                    )
+                    
+                    if test_response and test_response.text:
+                        self._model_name = model_name
                         self.model = test_model
-                        self.vision_model = genai.GenerativeModel(candidate)
-                        print(f"✅ 모델 선택됨: {candidate}")
-                        break
+                        self.vision_model = genai.GenerativeModel(model_name)
+                        self._initialized = True
+                        print(f"✅ 모델 선택 성공: {model_name}")
+                        return
+                        
                 except Exception as e:
-                    print(f"   ❌ {candidate} 실패: {e}")
+                    error_msg = str(e)
+                    if "404" in error_msg:
+                        print(f"   ⚠️ {model_name}: 모델 없음")
+                    elif "API_KEY" in error_msg or "401" in error_msg or "403" in error_msg:
+                        print(f"   ❌ API 키 오류: {e}")
+                        break  # API 키 문제면 다른 모델도 안됨
+                    else:
+                        print(f"   ⚠️ {model_name}: {e}")
                     continue
             
-            if self._model_name:
-                self._initialized = True
-                print(f"✅ Gemini 모델 초기화 성공: {self._model_name}")
-            else:
+            if not self._initialized:
                 print("❌ 사용 가능한 모델을 찾을 수 없습니다")
-                self._initialized = False
+                print("   API 키를 확인해주세요: https://aistudio.google.com/app/apikey")
             
         except Exception as e:
-            print(f"❌ Gemini 모델 초기화 실패: {e}")
+            print(f"❌ Gemini 초기화 실패: {e}")
             traceback.print_exc()
-            self._initialized = False
-        
+    
     def _get_language_name(self, lang: TargetLanguage) -> str:
-        """언어 코드를 언어명으로 변환"""
         return {
             TargetLanguage.ENGLISH: "English",
             TargetLanguage.JAPANESE: "Japanese",
@@ -101,14 +103,12 @@ class ProductTranslator:
         """상품 데이터 전체 번역"""
         
         print(f"\n{'='*50}")
-        print(f"🔄 번역 시작")
-        print(f"   - 모델 초기화: {self._initialized}")
-        print(f"   - 모델명: {self._model_name}")
-        print(f"   - 대상 언어: {target_language.value}")
+        print(f"🔄 번역 시작 (모델: {self._model_name}, 초기화: {self._initialized})")
         print(f"{'='*50}")
         
+        # 모델이 초기화되지 않았으면 원본 반환
         if not self._initialized or not self.model:
-            print("❌ 모델이 초기화되지 않음 - 원본 반환")
+            print("⚠️ 모델 미초기화 - 원본 데이터 반환")
             return TranslatedProduct(
                 original=product_data,
                 translated_title=product_data.title,
@@ -119,41 +119,30 @@ class ProductTranslator:
             )
         
         # 1. 제목 번역
-        print(f"\n📝 [1/4] 제목 번역")
-        print(f"   원본: {product_data.title[:50]}...")
-        translated_title = await self._translate_text_safe(
-            product_data.title,
-            target_language,
-            "상품명"
+        print(f"📝 제목 번역: {product_data.title[:30]}...")
+        translated_title = self._translate_sync(
+            product_data.title, target_language, "상품명"
         )
-        print(f"   결과: {translated_title[:50]}...")
         
         # 2. 설명 번역
-        print(f"\n📝 [2/4] 설명 번역")
-        print(f"   원본 길이: {len(product_data.description)}자")
-        translated_description = await self._translate_text_safe(
-            product_data.description,
-            target_language,
-            "상품 설명"
+        print(f"📝 설명 번역: {len(product_data.description)}자")
+        translated_description = self._translate_sync(
+            product_data.description, target_language, "상품 설명"
         )
-        print(f"   결과 길이: {len(translated_description)}자")
         
         # 3. 옵션 번역
-        print(f"\n📝 [3/4] 옵션 번역: {len(product_data.options)}개 그룹")
-        translated_options = await self._translate_options_safe(
-            product_data.options,
-            target_language
+        print(f"📝 옵션 번역: {len(product_data.options)}개")
+        translated_options = self._translate_options_sync(
+            product_data.options, target_language
         )
         
         # 4. OCR
-        print(f"\n📝 [4/4] 이미지 OCR: {len(product_data.detail_images)}개")
-        translated_image_texts = await self._process_images_safe(
-            product_data.detail_images,
-            target_language
+        print(f"📝 OCR: {len(product_data.detail_images)}개 이미지")
+        translated_image_texts = await self._process_images(
+            product_data.detail_images, target_language
         )
         
-        print(f"\n✅ 번역 완료!")
-        print(f"{'='*50}\n")
+        print(f"✅ 번역 완료!")
         
         return TranslatedProduct(
             original=product_data,
@@ -164,197 +153,114 @@ class ProductTranslator:
             target_language=target_language
         )
     
-    async def _translate_text_safe(
-        self,
-        text: str,
-        target_language: TargetLanguage,
-        context: str = ""
-    ) -> str:
-        """안전한 텍스트 번역 (에러 시 원문 반환)"""
-        
-        if not text or text.strip() == "":
+    def _translate_sync(self, text: str, target_language: TargetLanguage, context: str = "") -> str:
+        """동기 방식 텍스트 번역"""
+        if not text or not text.strip():
             return text
         if text in ["제목 없음", "설명 없음", "가격 정보 없음", "작가명 없음"]:
             return text
         
-        lang_name = self._get_language_name(target_language)
+        lang = self._get_language_name(target_language)
         
-        prompt = f"""Translate the following Korean text to {lang_name}.
+        prompt = f"""Translate this Korean text to {lang}. Output only the translation, nothing else.
 
-RULES:
-- Output ONLY the translated text
-- Do NOT add any explanations or notes
-- Keep brand names unchanged
-- For Japanese: use です/ます form
+Korean: {text}
 
-Context: {context}
-
-Korean:
-{text}
-
-{lang_name}:"""
+{lang}:"""
 
         try:
-            print(f"      API 호출 중...")
-            
-            # generate_content_async 사용
-            response = await self.model.generate_content_async(
+            response = self.model.generate_content(
                 prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.2,
-                    max_output_tokens=4000,
-                )
+                generation_config={"temperature": 0.2, "max_output_tokens": 4000}
             )
             
             if response and response.text:
                 result = response.text.strip()
-                
                 # 접두사 제거
-                prefixes = ["Translation:", "English:", "Japanese:", "번역:", f"{lang_name}:"]
-                for prefix in prefixes:
+                for prefix in [f"{lang}:", "Translation:", "번역:"]:
                     if result.startswith(prefix):
                         result = result[len(prefix):].strip()
-                
-                print(f"      ✅ 번역 성공")
+                print(f"   ✅ 번역 성공")
                 return result
-            else:
-                print(f"      ⚠️ 응답 없음")
-                return text
-                
+            
+            return text
+            
         except Exception as e:
-            print(f"      ❌ 번역 실패: {e}")
-            traceback.print_exc()
+            print(f"   ❌ 번역 실패: {e}")
             return text
     
-    async def _translate_options_safe(
-        self,
-        options: list[ProductOption],
-        target_language: TargetLanguage
+    def _translate_options_sync(
+        self, options: list[ProductOption], target_language: TargetLanguage
     ) -> list[ProductOption]:
         """옵션 번역"""
-        translated_options = []
-        
-        for i, option in enumerate(options):
+        result = []
+        for opt in options:
             try:
-                print(f"   옵션 {i+1}: {option.name}")
-                
-                translated_name = await self._translate_text_safe(
-                    option.name,
-                    target_language,
-                    "옵션명"
-                )
-                
-                translated_values = []
-                for value in option.values:
-                    translated_value = await self._translate_text_safe(
-                        value,
-                        target_language,
-                        "옵션값"
-                    )
-                    translated_values.append(translated_value)
-                
-                translated_options.append(ProductOption(
-                    name=translated_name,
-                    values=translated_values
-                ))
-                
-            except Exception as e:
-                print(f"   ⚠️ 옵션 번역 실패: {e}")
-                translated_options.append(option)
-        
-        return translated_options
+                name = self._translate_sync(opt.name, target_language, "옵션명")
+                values = [self._translate_sync(v, target_language, "옵션값") for v in opt.values]
+                result.append(ProductOption(name=name, values=values))
+            except:
+                result.append(opt)
+        return result
     
-    async def _process_images_safe(
-        self,
-        image_urls: list[str],
-        target_language: TargetLanguage
+    async def _process_images(
+        self, image_urls: list[str], target_language: TargetLanguage
     ) -> list[ImageText]:
-        """이미지 OCR 및 번역"""
+        """이미지 OCR"""
         results = []
+        max_images = int(os.getenv("MAX_OCR_IMAGES", "10"))
         
-        max_images = int(os.getenv("MAX_OCR_IMAGES", "15"))
-        images_to_process = image_urls[:max_images]
-        
-        print(f"   처리할 이미지: {len(images_to_process)}개")
-        
-        for idx, url in enumerate(images_to_process):
+        for idx, url in enumerate(image_urls[:max_images]):
             try:
-                print(f"   [{idx+1}/{len(images_to_process)}] {url[:50]}...")
+                print(f"   [{idx+1}] OCR: {url[:50]}...")
+                ocr_text = await self._ocr_image(url)
                 
-                ocr_result = await self._extract_text_from_image_safe(url)
-                
-                if ocr_result and len(ocr_result) > 10:
-                    print(f"      ✅ 텍스트 발견: {len(ocr_result)}자")
-                    
-                    translated = await self._translate_text_safe(
-                        ocr_result,
-                        target_language,
-                        "이미지 텍스트"
-                    )
-                    
+                if ocr_text and len(ocr_text) > 10:
+                    print(f"      ✅ 텍스트 발견: {len(ocr_text)}자")
+                    translated = self._translate_sync(ocr_text, target_language, "이미지 텍스트")
                     results.append(ImageText(
                         image_url=url,
-                        original_text=ocr_result,
+                        original_text=ocr_text,
                         translated_text=translated
                     ))
                 else:
                     print(f"      ⬜ 텍스트 없음")
-                    
             except Exception as e:
                 print(f"      ❌ 오류: {e}")
-                continue
         
-        print(f"   OCR 결과: {len(results)}개 텍스트")
         return results
     
-    async def _extract_text_from_image_safe(self, image_url: str) -> Optional[str]:
-        """이미지에서 텍스트 추출"""
-        
+    async def _ocr_image(self, image_url: str) -> Optional[str]:
+        """이미지 OCR"""
         if not self.vision_model:
-            print(f"      ⚠️ Vision 모델 없음")
             return None
         
         try:
-            # 이미지 다운로드
-            async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-                response = await client.get(image_url)
-                if response.status_code != 200:
-                    print(f"      이미지 다운로드 실패: {response.status_code}")
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(image_url)
+                if resp.status_code != 200:
                     return None
-                image_data = response.content
+                image_data = resp.content
             
             # MIME 타입
-            content_type = response.headers.get("content-type", "").lower()
-            if "png" in content_type:
-                mime_type = "image/png"
-            elif "webp" in content_type:
-                mime_type = "image/webp"
-            elif "gif" in content_type:
-                mime_type = "image/gif"
-            else:
-                mime_type = "image/jpeg"
+            ct = resp.headers.get("content-type", "").lower()
+            mime = "image/jpeg"
+            if "png" in ct: mime = "image/png"
+            elif "webp" in ct: mime = "image/webp"
+            elif "gif" in ct: mime = "image/gif"
             
-            # Base64 인코딩
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            b64 = base64.b64encode(image_data).decode()
             
-            prompt = """이 이미지에서 한국어 텍스트를 모두 추출해주세요.
-텍스트가 없으면 "NO_TEXT"만 응답하세요.
-설명 없이 텍스트만 출력하세요."""
-
-            # Vision API 호출
-            response = await self.vision_model.generate_content_async([
-                prompt,
-                {
-                    "mime_type": mime_type,
-                    "data": image_base64
-                }
+            response = self.vision_model.generate_content([
+                "이 이미지에서 한국어 텍스트만 추출해주세요. 텍스트가 없으면 NO_TEXT만 응답하세요.",
+                {"mime_type": mime, "data": b64}
             ])
             
             if response and response.text:
-                result = response.text.strip()
-                if result == "NO_TEXT" or len(result) < 5:
+                text = response.text.strip()
+                if text == "NO_TEXT" or len(text) < 5:
                     return None
-                return result
+                return text
             
             return None
             
@@ -362,10 +268,5 @@ Korean:
             print(f"      OCR 오류: {e}")
             return None
     
-    async def translate_single_text(
-        self,
-        text: str,
-        target_language: TargetLanguage
-    ) -> str:
-        """단일 텍스트 번역"""
-        return await self._translate_text_safe(text, target_language, "텍스트")
+    async def translate_single_text(self, text: str, target_language: TargetLanguage) -> str:
+        return self._translate_sync(text, target_language, "텍스트")

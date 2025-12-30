@@ -10,7 +10,7 @@ git add .
 git status
 echo.
 echo Committing changes...
-git commit -m "fix: Auto-detect available Gemini model (gemini-pro fallback)"
+git commit -m "fix: Update google-generativeai version, try multiple model name formats"
 echo.
 echo Pushing to remote...
 git push
