@@ -80,7 +80,8 @@ GB-translation/
 
 | Variable | Value |
 |----------|-------|
-| `GEMINI_API_KEY` | `AIzaSyB4HcvCL8x_vUGH1he5p5wI3erIlom4s5Y` |
+| `GEMINI_API_KEY` | `your-gemini-api-key` |
+| `MAX_OCR_IMAGES` | `20` (기본값, 필요 시 10~30 권장) |
 | `PORT` | `8000` (자동 설정됨) |
 
 ### 2.4 배포 확인

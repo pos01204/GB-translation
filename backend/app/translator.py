@@ -4,6 +4,8 @@ Google Gemini 기반 번역 및 OCR 모듈
 """
 import base64
 import httpx
+import os
+import tempfile
 from typing import Optional
 import google.generativeai as genai
 
@@ -192,7 +194,8 @@ Korean text to translate:
         results = []
         lang_name = self._get_language_name(target_language)
         
-        for url in image_urls[:10]:  # 최대 10개 이미지만 처리
+        max_images = int(os.getenv("MAX_OCR_IMAGES", "20"))
+        for url in image_urls[:max_images]:  # 기본 최대 20개 이미지만 처리
             try:
                 # 이미지에서 텍스트 추출
                 ocr_result = await self._extract_text_from_image(url)
@@ -239,40 +242,58 @@ Guidelines:
 이 이미지에서 모든 한국어 텍스트를 추출해주세요."""
 
         try:
+            if not self.vision_model:
+                return None
+
             # 이미지 URL에서 이미지 데이터 가져오기
-            async with httpx.AsyncClient() as client:
-                response = await client.get(image_url, timeout=30.0)
-                if response.status_code != 200:
-                    print(f"이미지 다운로드 실패: {image_url}")
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                img_resp = await client.get(image_url, timeout=30.0)
+                if img_resp.status_code != 200:
+                    print(f"이미지 다운로드 실패({img_resp.status_code}): {image_url}")
                     return None
-                image_data = response.content
-            
+                image_data = img_resp.content
+
             # 이미지 MIME 타입 추정
-            content_type = response.headers.get('content-type', 'image/jpeg')
-            if 'png' in content_type:
-                mime_type = 'image/png'
-            elif 'gif' in content_type:
-                mime_type = 'image/gif'
-            elif 'webp' in content_type:
-                mime_type = 'image/webp'
+            content_type = (img_resp.headers.get("content-type") or "").lower()
+            if "png" in content_type:
+                mime_type = "image/png"
+                suffix = ".png"
+            elif "gif" in content_type:
+                mime_type = "image/gif"
+                suffix = ".gif"
+            elif "webp" in content_type:
+                mime_type = "image/webp"
+                suffix = ".webp"
             else:
-                mime_type = 'image/jpeg'
-            
-            # Gemini에 이미지와 프롬프트 전송
-            image_part = {
-                "mime_type": mime_type,
-                "data": image_data
-            }
-            
-            response = await self.vision_model.generate_content_async(
-                [prompt, image_part],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=2000,
+                mime_type = "image/jpeg"
+                suffix = ".jpg"
+
+            # Gemini 이미지 파트 전달은 라이브러리 버전에 따라 포맷 차이가 있어
+            # 가장 안정적인 방식인 "임시 파일 저장 -> genai.upload_file"로 처리합니다.
+            uploaded = None
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+                    f.write(image_data)
+                    tmp_path = f.name
+
+                uploaded = genai.upload_file(tmp_path, mime_type=mime_type)
+
+                resp = await self.vision_model.generate_content_async(
+                    [prompt, uploaded],
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.1,
+                        max_output_tokens=2000,
+                    ),
                 )
-            )
-            
-            result = response.text.strip()
+                result = (resp.text or "").strip()
+            finally:
+                # 임시 파일 삭제
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
             
             # 텍스트가 없는 경우
             if result == "NO_TEXT" or len(result) < 5:
