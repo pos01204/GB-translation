@@ -99,6 +99,26 @@ class ProductTranslator:
         
         self._last_request_time = time.time()
     
+    def _prioritize_high_res_images(self, images: list[str]) -> list[str]:
+        """고해상도 이미지를 우선 정렬 (OCR 품질 향상)"""
+        import re
+        
+        high_res = []  # _720, _800, _1000 등
+        normal = []
+        
+        for img in images:
+            low = img.lower()
+            # 고해상도 패턴 확인
+            if re.search(r'_([5-9]\d{2}|[1-9]\d{3})\.', low):  # _500 이상
+                high_res.append(img)
+            elif re.search(r'/([5-9]\d{2}|[1-9]\d{3})/', low):  # /500/ 이상
+                high_res.append(img)
+            else:
+                normal.append(img)
+        
+        # 고해상도 이미지 먼저, 그 다음 일반 이미지
+        return high_res + normal
+    
     def _get_language_name(self, lang: TargetLanguage) -> str:
         return {
             TargetLanguage.ENGLISH: "English",
@@ -145,11 +165,15 @@ class ProductTranslator:
             product_data.options, target_language
         )
         
-        # 4. OCR (Rate Limit 고려하여 제한)
-        max_ocr = int(os.getenv("MAX_OCR_IMAGES", "5"))  # 기본값 5개로 줄임
-        print(f"📝 OCR: {len(product_data.detail_images)}개 이미지 중 최대 {max_ocr}개 처리")
+        # 4. OCR (고해상도 이미지 우선, Rate Limit 고려)
+        max_ocr = int(os.getenv("MAX_OCR_IMAGES", "15"))  # 기본값 15개
+        
+        # 고해상도 이미지 우선 정렬 (_720, _800 등)
+        sorted_images = self._prioritize_high_res_images(product_data.detail_images)
+        
+        print(f"📝 OCR: {len(sorted_images)}개 이미지 중 최대 {max_ocr}개 처리")
         translated_image_texts = await self._process_images(
-            product_data.detail_images[:max_ocr], target_language
+            sorted_images[:max_ocr], target_language
         )
         
         print(f"✅ 번역 완료!")
