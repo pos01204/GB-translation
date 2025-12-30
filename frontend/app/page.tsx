@@ -13,6 +13,7 @@ import { SideBySideView } from '@/components/SideBySideView'
 import { OptionTable } from '@/components/OptionTable'
 import { ImageOcrResults } from '@/components/ImageOcrResults'
 import { ImageGallery } from '@/components/ImageGallery'
+import { FinalTranslation } from '@/components/FinalTranslation'
 
 import { 
   scrapeProduct, 
@@ -216,8 +217,11 @@ export default function Home() {
           </div>
 
           {/* 탭 네비게이션 */}
-          <Tabs defaultValue="content" className="w-full">
-            <TabsList className="grid w-full grid-cols-4 max-w-lg">
+          <Tabs defaultValue="final" className="w-full">
+            <TabsList className="grid w-full grid-cols-5 max-w-2xl">
+              <TabsTrigger value="final" className="text-primary font-semibold">
+                📝 최종본
+              </TabsTrigger>
               <TabsTrigger value="content">상품 정보</TabsTrigger>
               <TabsTrigger value="options">옵션</TabsTrigger>
               <TabsTrigger value="gallery">
@@ -237,6 +241,17 @@ export default function Home() {
                 )}
               </TabsTrigger>
             </TabsList>
+
+            {/* 최종 번역본 탭 */}
+            <TabsContent value="final" className="mt-6">
+              <FinalTranslation
+                translatedTitle={translatedData.translated_title}
+                translatedDescription={translatedData.translated_description}
+                translatedOptions={translatedData.translated_options}
+                translatedImageTexts={translatedData.translated_image_texts}
+                targetLanguage={currentLanguage}
+              />
+            </TabsContent>
 
             {/* 상품 정보 탭 */}
             <TabsContent value="content" className="mt-6">

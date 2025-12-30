@@ -183,29 +183,99 @@ class IdusScraper:
         return "제목 없음"
 
     async def _get_artist(self, page: Page) -> str:
+        """작가명 추출 - 여러 방법 시도"""
         try:
-            link = await page.query_selector('a[href*="/artist/"]')
-            if link:
-                text = (await link.inner_text() or "").strip()
-                if 2 <= len(text) <= 50 and "바로가기" not in text:
-                    return text
-        except: pass
-        return "작가명 없음"
-
-    async def _get_price(self, page: Page) -> str:
-        try:
+            # 방법 1: artist 링크에서 추출
             result = await page.evaluate("""
                 () => {
-                    const els = document.querySelectorAll('[class*="price"], [class*="Price"]');
-                    for (const el of els) {
-                        const m = (el.innerText || '').match(/[\\d,]+\\s*원/);
-                        if (m) return m[0];
+                    // artist 링크 찾기
+                    const artistLinks = document.querySelectorAll('a[href*="/artist/"]');
+                    for (const link of artistLinks) {
+                        const text = (link.innerText || '').trim();
+                        // 유효한 작가명인지 확인 (2~30자, 특수문자/UI텍스트 제외)
+                        if (text.length >= 2 && text.length <= 30) {
+                            if (!text.includes('바로가기') && !text.includes('작가') && 
+                                !text.includes('홈') && !text.includes('샵')) {
+                                return text;
+                            }
+                        }
                     }
+                    
+                    // 방법 2: 작가 관련 클래스에서 찾기
+                    const selectors = [
+                        '[class*="artist-name"]',
+                        '[class*="artistName"]', 
+                        '[class*="seller-name"]',
+                        '[class*="shop-name"]',
+                        '[class*="author"]'
+                    ];
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            const text = (el.innerText || '').trim();
+                            if (text.length >= 2 && text.length <= 30) {
+                                return text;
+                            }
+                        }
+                    }
+                    
+                    // 방법 3: meta 태그에서 찾기
+                    const metaAuthor = document.querySelector('meta[name="author"]');
+                    if (metaAuthor) {
+                        const content = metaAuthor.getAttribute('content');
+                        if (content && content.length >= 2) return content;
+                    }
+                    
                     return null;
                 }
             """)
-            if result: return result
-        except: pass
+            if result:
+                return result
+        except Exception as e:
+            print(f"작가명 추출 오류: {e}")
+        return "작가명 없음"
+
+    async def _get_price(self, page: Page) -> str:
+        """가격 추출 - 여러 방법 시도"""
+        try:
+            result = await page.evaluate("""
+                () => {
+                    // 방법 1: 가격 관련 클래스에서 찾기 (할인가 우선)
+                    const priceSelectors = [
+                        '[class*="sale-price"]',
+                        '[class*="salePrice"]',
+                        '[class*="final-price"]',
+                        '[class*="finalPrice"]',
+                        '[class*="discount-price"]',
+                        '[class*="price"]'
+                    ];
+                    
+                    for (const sel of priceSelectors) {
+                        const els = document.querySelectorAll(sel);
+                        for (const el of els) {
+                            const text = el.innerText || '';
+                            // 숫자,원 패턴 매칭 (최소 3자리 이상)
+                            const match = text.match(/([\\d,]{3,})\\s*원/);
+                            if (match) {
+                                return match[0];
+                            }
+                        }
+                    }
+                    
+                    // 방법 2: 전체 페이지에서 첫 번째 가격 패턴 찾기
+                    const allText = document.body.innerText || '';
+                    const priceMatch = allText.match(/([\\d,]{4,})\\s*원/);
+                    if (priceMatch) {
+                        return priceMatch[0];
+                    }
+                    
+                    return null;
+                }
+            """)
+            if result:
+                return result
+        except Exception as e:
+            print(f"가격 추출 오류: {e}")
         return "가격 정보 없음"
 
     async def _get_description(self, page: Page) -> str:
@@ -243,32 +313,123 @@ class IdusScraper:
         return "설명 없음"
 
     async def _get_options(self, page: Page) -> list[ProductOption]:
-        options_dict: dict[str, set[str]] = {}
+        """옵션 추출 - 실제 옵션 UI에서 추출 (리뷰 데이터 제외)"""
+        options_dict: dict[str, list[str]] = {}
         
         try:
-            texts = await page.evaluate("""
+            # 방법 1: 옵션 선택 버튼 클릭하여 실제 옵션 추출
+            result = await page.evaluate("""
                 () => {
-                    const result = [];
-                    document.querySelectorAll('a, span, div, p').forEach(el => {
-                        const t = el.innerText || '';
-                        if (t.includes('구매작품') && t.includes(':')) result.push(t);
+                    const options = {};
+                    
+                    // 옵션 그룹 찾기 (select, radio, button 등)
+                    // 1. select 요소
+                    document.querySelectorAll('select').forEach(sel => {
+                        const name = sel.getAttribute('name') || sel.getAttribute('aria-label') || '옵션';
+                        const values = [];
+                        sel.querySelectorAll('option').forEach(opt => {
+                            const text = (opt.innerText || '').trim();
+                            // 기본값/안내문구 제외
+                            if (text && !text.includes('선택') && !text.includes('옵션을') && 
+                                text.length > 1 && text.length < 100) {
+                                values.push(text);
+                            }
+                        });
+                        if (values.length > 0) {
+                            options[name] = values;
+                        }
                     });
-                    return result;
+                    
+                    // 2. 옵션 버튼 그룹
+                    document.querySelectorAll('[role="radiogroup"], [role="listbox"]').forEach(group => {
+                        const name = group.getAttribute('aria-label') || '옵션';
+                        const values = [];
+                        group.querySelectorAll('[role="radio"], [role="option"], button').forEach(btn => {
+                            const text = (btn.innerText || '').trim().split('\\n')[0]; // 첫 줄만
+                            if (text && text.length > 1 && text.length < 80 &&
+                                !text.includes('선택') && !text.includes('구매')) {
+                                values.push(text);
+                            }
+                        });
+                        if (values.length > 0) {
+                            options[name] = values;
+                        }
+                    });
+                    
+                    return options;
                 }
             """)
             
-            for text in texts:
-                for part in text.split("구매작품")[1:]:
-                    for opt in part.split("*"):
-                        match = re.search(r':\s*([^:]+):\s*([^*]+)', opt)
-                        if match:
-                            name = match.group(1).strip()
-                            value = match.group(2).strip()
-                            if name and value:
-                                options_dict.setdefault(name, set()).add(value)
-        except: pass
+            if result:
+                for name, values in result.items():
+                    if values:
+                        # 짧고 유효한 옵션값만 유지 (리뷰/설명 텍스트 제외)
+                        clean_values = []
+                        for v in values:
+                            # 옵션값은 보통 짧음 (80자 이내)
+                            if len(v) <= 80 and not self._is_review_text(v):
+                                clean_values.append(v)
+                        if clean_values:
+                            options_dict[name] = clean_values
+            
+            # 방법 2: 후기에서 "옵션명: 옵션값" 패턴만 추출 (간결한 것만)
+            if not options_dict:
+                texts = await page.evaluate("""
+                    () => {
+                        const result = [];
+                        document.querySelectorAll('[class*="review"], [class*="option"]').forEach(el => {
+                            const t = el.innerText || '';
+                            // "옵션:" 패턴만 찾기 (짧은 것만)
+                            const lines = t.split('\\n');
+                            for (const line of lines) {
+                                if (line.includes(':') && line.length < 100) {
+                                    result.push(line.trim());
+                                }
+                            }
+                        });
+                        return result.slice(0, 20); // 최대 20개만
+                    }
+                """)
+                
+                for text in (texts or []):
+                    # "옵션명: 옵션값" 형식만 파싱
+                    match = re.match(r'^([^:]{2,20}):\s*(.{2,50})$', text.strip())
+                    if match:
+                        name = match.group(1).strip()
+                        value = match.group(2).strip()
+                        # 리뷰 텍스트가 아닌 것만
+                        if not self._is_review_text(name) and not self._is_review_text(value):
+                            if name not in options_dict:
+                                options_dict[name] = []
+                            if value not in options_dict[name]:
+                                options_dict[name].append(value)
+                                
+        except Exception as e:
+            print(f"옵션 추출 오류: {e}")
         
-        return [ProductOption(name=n, values=list(v)) for n, v in options_dict.items() if v]
+        return [ProductOption(name=n, values=v) for n, v in options_dict.items() if v]
+    
+    def _is_review_text(self, text: str) -> bool:
+        """리뷰/댓글 텍스트인지 판별"""
+        review_keywords = [
+            '좋아요', '추천', '만족', '감사', '예쁘', '귀여', '멋', '최고',
+            '배송', '포장', '선물', '구매', '주문', '도착', '작품',
+            '키워드', '댓글', '후기', '리뷰', '작가님', '감동',
+            '역시', '진짜', '정말', '너무', '완전', '대박',
+            '년', '월', '일', 'Rainbow', 'www', 'http',
+            '#', '@', '!'
+        ]
+        
+        # 너무 긴 텍스트는 리뷰일 가능성 높음
+        if len(text) > 60:
+            return True
+            
+        # 리뷰 키워드 포함 여부
+        for keyword in review_keywords:
+            if keyword in text:
+                return True
+        
+        return False
 
     async def _full_scroll(self, page: Page):
         """페이지 전체를 천천히 스크롤"""
