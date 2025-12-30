@@ -313,123 +313,124 @@ class IdusScraper:
         return "설명 없음"
 
     async def _get_options(self, page: Page) -> list[ProductOption]:
-        """옵션 추출 - 실제 옵션 UI에서 추출 (리뷰 데이터 제외)"""
-        options_dict: dict[str, list[str]] = {}
+        """옵션 추출 - 옵션 버튼 클릭하여 실제 옵션 추출"""
+        options: list[ProductOption] = []
         
         try:
-            # 방법 1: 옵션 선택 버튼 클릭하여 실제 옵션 추출
-            result = await page.evaluate("""
-                () => {
-                    const options = {};
-                    
-                    // 옵션 그룹 찾기 (select, radio, button 등)
-                    // 1. select 요소
-                    document.querySelectorAll('select').forEach(sel => {
-                        const name = sel.getAttribute('name') || sel.getAttribute('aria-label') || '옵션';
-                        const values = [];
-                        sel.querySelectorAll('option').forEach(opt => {
-                            const text = (opt.innerText || '').trim();
-                            // 기본값/안내문구 제외
-                            if (text && !text.includes('선택') && !text.includes('옵션을') && 
-                                text.length > 1 && text.length < 100) {
-                                values.push(text);
-                            }
-                        });
-                        if (values.length > 0) {
-                            options[name] = values;
-                        }
-                    });
-                    
-                    // 2. 옵션 버튼 그룹
-                    document.querySelectorAll('[role="radiogroup"], [role="listbox"]').forEach(group => {
-                        const name = group.getAttribute('aria-label') || '옵션';
-                        const values = [];
-                        group.querySelectorAll('[role="radio"], [role="option"], button').forEach(btn => {
-                            const text = (btn.innerText || '').trim().split('\\n')[0]; // 첫 줄만
-                            if (text && text.length > 1 && text.length < 80 &&
-                                !text.includes('선택') && !text.includes('구매')) {
-                                values.push(text);
-                            }
-                        });
-                        if (values.length > 0) {
-                            options[name] = values;
-                        }
-                    });
-                    
-                    return options;
-                }
-            """)
+            # 방법 1: "옵션을 선택해주세요" 버튼 클릭하여 옵션 패널 열기
+            option_trigger = await page.query_selector('button:has-text("옵션을 선택해주세요")')
+            if not option_trigger:
+                option_trigger = await page.query_selector('button:has-text("옵션 선택")')
+            if not option_trigger:
+                option_trigger = await page.query_selector('[class*="option"] button')
             
-            if result:
-                for name, values in result.items():
-                    if values:
-                        # 짧고 유효한 옵션값만 유지 (리뷰/설명 텍스트 제외)
-                        clean_values = []
-                        for v in values:
-                            # 옵션값은 보통 짧음 (80자 이내)
-                            if len(v) <= 80 and not self._is_review_text(v):
-                                clean_values.append(v)
-                        if clean_values:
-                            options_dict[name] = clean_values
-            
-            # 방법 2: 후기에서 "옵션명: 옵션값" 패턴만 추출 (간결한 것만)
-            if not options_dict:
-                texts = await page.evaluate("""
+            if option_trigger:
+                print("   📌 옵션 버튼 클릭 시도...")
+                await option_trigger.click()
+                await asyncio.sleep(1)
+                
+                # 옵션 패널에서 옵션 그룹 찾기
+                option_data = await page.evaluate("""
                     () => {
                         const result = [];
-                        document.querySelectorAll('[class*="review"], [class*="option"]').forEach(el => {
-                            const t = el.innerText || '';
-                            // "옵션:" 패턴만 찾기 (짧은 것만)
-                            const lines = t.split('\\n');
-                            for (const line of lines) {
-                                if (line.includes(':') && line.length < 100) {
-                                    result.push(line.trim());
+                        
+                        // 바텀시트/다이얼로그에서 옵션 그룹 찾기
+                        const panels = document.querySelectorAll('[role="dialog"], [class*="sheet"], [class*="modal"], [class*="option"]');
+                        
+                        for (const panel of panels) {
+                            // 옵션 그룹 헤더 찾기 (1. 쿠키 선택, 2. 수량 등)
+                            const groups = panel.querySelectorAll('[class*="group"], [class*="category"], h3, h4, [class*="title"]');
+                            
+                            // role="option" 또는 버튼 형태의 옵션 아이템 찾기
+                            const items = panel.querySelectorAll('[role="option"], [role="radio"], [class*="option-item"], li button, li[class*="item"]');
+                            
+                            if (items.length > 0) {
+                                const values = [];
+                                items.forEach(item => {
+                                    // 첫 번째 줄만 추출 (가격 등 부가정보 제외)
+                                    let text = (item.innerText || '').trim().split('\\n')[0].trim();
+                                    
+                                    // 유효한 옵션값인지 확인
+                                    if (text && text.length >= 2 && text.length <= 50) {
+                                        // UI 텍스트/노이즈 제외
+                                        const noise = ['선택', '확인', '취소', '닫기', '장바구니', '구매', '원', '₩', '품절'];
+                                        let isNoise = noise.some(n => text.includes(n));
+                                        if (!isNoise) {
+                                            values.push(text);
+                                        }
+                                    }
+                                });
+                                
+                                if (values.length > 0) {
+                                    // 옵션 그룹 이름 찾기
+                                    let groupName = '옵션';
+                                    for (const g of groups) {
+                                        const gText = (g.innerText || '').trim();
+                                        // "1. 쿠키 선택" 형식에서 이름 추출
+                                        const match = gText.match(/^\\d+\\.?\\s*(.+)/);
+                                        if (match) {
+                                            groupName = match[1].trim();
+                                            break;
+                                        } else if (gText.length >= 2 && gText.length <= 20) {
+                                            groupName = gText;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    result.push({ name: groupName, values: values });
                                 }
                             }
-                        });
-                        return result.slice(0, 20); // 최대 20개만
+                        }
+                        
+                        return result;
                     }
                 """)
                 
-                for text in (texts or []):
-                    # "옵션명: 옵션값" 형식만 파싱
-                    match = re.match(r'^([^:]{2,20}):\s*(.{2,50})$', text.strip())
-                    if match:
-                        name = match.group(1).strip()
-                        value = match.group(2).strip()
-                        # 리뷰 텍스트가 아닌 것만
-                        if not self._is_review_text(name) and not self._is_review_text(value):
-                            if name not in options_dict:
-                                options_dict[name] = []
-                            if value not in options_dict[name]:
-                                options_dict[name].append(value)
-                                
+                if option_data:
+                    for opt in option_data:
+                        if opt.get('values'):
+                            # 중복 제거
+                            unique_values = list(dict.fromkeys(opt['values']))
+                            options.append(ProductOption(name=opt['name'], values=unique_values))
+                
+                # 패널 닫기
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
+            
+            # 방법 2: 옵션 버튼이 없는 경우, select 요소에서 추출
+            if not options:
+                select_options = await page.evaluate("""
+                    () => {
+                        const result = [];
+                        document.querySelectorAll('select').forEach(sel => {
+                            const name = sel.getAttribute('aria-label') || sel.getAttribute('name') || '옵션';
+                            const values = [];
+                            sel.querySelectorAll('option').forEach(opt => {
+                                const text = (opt.innerText || '').trim();
+                                if (text && text.length >= 2 && text.length <= 50 && 
+                                    !text.includes('선택') && !text.includes('옵션을')) {
+                                    values.push(text);
+                                }
+                            });
+                            if (values.length > 0) {
+                                result.push({ name, values });
+                            }
+                        });
+                        return result;
+                    }
+                """)
+                
+                if select_options:
+                    for opt in select_options:
+                        if opt.get('values'):
+                            options.append(ProductOption(name=opt['name'], values=opt['values']))
+            
+            print(f"   📌 옵션 추출 완료: {len(options)}개 그룹")
+            
         except Exception as e:
             print(f"옵션 추출 오류: {e}")
         
-        return [ProductOption(name=n, values=v) for n, v in options_dict.items() if v]
-    
-    def _is_review_text(self, text: str) -> bool:
-        """리뷰/댓글 텍스트인지 판별"""
-        review_keywords = [
-            '좋아요', '추천', '만족', '감사', '예쁘', '귀여', '멋', '최고',
-            '배송', '포장', '선물', '구매', '주문', '도착', '작품',
-            '키워드', '댓글', '후기', '리뷰', '작가님', '감동',
-            '역시', '진짜', '정말', '너무', '완전', '대박',
-            '년', '월', '일', 'Rainbow', 'www', 'http',
-            '#', '@', '!'
-        ]
-        
-        # 너무 긴 텍스트는 리뷰일 가능성 높음
-        if len(text) > 60:
-            return True
-            
-        # 리뷰 키워드 포함 여부
-        for keyword in review_keywords:
-            if keyword in text:
-                return True
-        
-        return False
+        return options
 
     async def _full_scroll(self, page: Page):
         """페이지 전체를 천천히 스크롤"""

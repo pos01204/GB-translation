@@ -9,7 +9,7 @@ git add -A
 
 echo.
 echo Committing...
-git commit -m "fix: improve scraper and add final translation view"
+git commit -m "fix: improve option extraction and remove final tab"
 
 echo.
 echo Pushing to origin...
