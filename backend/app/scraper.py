@@ -1,6 +1,6 @@
 """
 아이디어스(Idus) 상품 크롤링 모듈
-Playwright + Idus API 직접 호출 방식으로 안정적인 데이터 수집
+Playwright + 정확한 셀렉터 기반 데이터 추출
 """
 import asyncio
 import json
@@ -9,13 +9,12 @@ import os
 from typing import Optional, Any
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from playwright_stealth import stealth_async
-import httpx
 
 from .models import ProductData, ProductOption, ImageText
 
 
 class IdusScraper:
-    """아이디어스 상품 페이지 크롤러 - API 기반 + DOM 폴백"""
+    """아이디어스 상품 페이지 크롤러"""
     
     def __init__(self):
         self.browser: Optional[Browser] = None
@@ -33,7 +32,6 @@ class IdusScraper:
         try:
             self.playwright = await async_playwright().start()
             
-            # Railway/Docker 환경 감지
             is_docker = os.path.exists('/.dockerenv') or os.getenv('RAILWAY_ENVIRONMENT')
             
             launch_args = [
@@ -108,49 +106,25 @@ class IdusScraper:
         page = await self.context.new_page()
         await stealth_async(page)
         return page
-
-    def _extract_product_uuid(self, url: str) -> Optional[str]:
-        """URL에서 상품 UUID 추출"""
-        # /v2/product/{uuid} 형식
-        match = re.search(r'/v2/product/([a-f0-9-]{36})', url)
-        if match:
-            return match.group(1)
-        # /w/product/{uuid} 형식
-        match = re.search(r'/w/product/([a-f0-9-]{36})', url)
-        if match:
-            return match.group(1)
-        return None
     
     async def scrape_product(self, url: str) -> ProductData:
-        """상품 페이지 크롤링 - API 우선, DOM 폴백"""
+        """상품 페이지 크롤링"""
         if not self._initialized:
             await self.initialize()
         
-        product_uuid = self._extract_product_uuid(url)
         print(f"📄 크롤링 시작: {url}")
-        print(f"📦 상품 UUID: {product_uuid}")
         
         page = await self._create_stealth_page()
         
-        # 네트워크 응답 캡처를 위한 저장소
-        api_responses: dict[str, Any] = {}
+        # 이미지 URL 수집을 위한 네트워크 응답 캡처
         image_urls_from_network: list[str] = []
         
-        async def handle_response(response):
+        def handle_response(response):
             try:
-                url_str = response.url
-                # Idus API 응답 캡처
-                if '/api/aggregator/' in url_str or '/www-api/' in url_str:
-                    if response.ok:
-                        try:
-                            data = await response.json()
-                            api_responses[url_str] = data
-                        except:
-                            pass
-                # 이미지 URL 캡처
                 if response.request.resource_type == "image":
-                    if url_str.startswith('http') and 'idus' in url_str.lower():
-                        image_urls_from_network.append(url_str)
+                    img_url = response.url
+                    if img_url.startswith('http') and 'idus' in img_url.lower():
+                        image_urls_from_network.append(img_url)
             except:
                 pass
         
@@ -159,59 +133,36 @@ class IdusScraper:
         try:
             # 페이지 로드
             await page.goto(url, wait_until='networkidle', timeout=45000)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             
-            # 동적 컨텐츠 로딩을 위한 스크롤
-            await self._scroll_page(page)
+            # 1. 상품명: 페이지 타이틀에서 추출 (가장 정확함)
+            title = await self._extract_title_from_page(page)
             
-            # 1. Nuxt.js 데이터에서 추출 시도
-            nuxt_data = await self._extract_nuxt_data(page)
+            # 2. 작가명 추출
+            artist_name = await self._extract_artist_name(page)
             
-            # 2. API 응답에서 데이터 추출
-            api_data = self._parse_api_responses(api_responses, product_uuid)
+            # 3. 가격 추출
+            price = await self._extract_price(page)
             
-            # 3. DOM에서 추출 (폴백)
-            dom_data = await self._extract_from_dom(page)
+            # 4. 상품 설명 추출
+            description = await self._extract_description(page)
             
-            # 데이터 병합 (우선순위: API > Nuxt > DOM)
-            title = api_data.get('title') or nuxt_data.get('title') or dom_data.get('title') or "제목 없음"
-            artist_name = api_data.get('artist_name') or nuxt_data.get('artist_name') or dom_data.get('artist_name') or "작가명 없음"
-            price = api_data.get('price') or nuxt_data.get('price') or dom_data.get('price') or "가격 정보 없음"
-            description = api_data.get('description') or nuxt_data.get('description') or dom_data.get('description') or "설명 없음"
+            # 5. 옵션 추출 (후기에서 + 인터랙티브)
+            options = await self._extract_options_complete(page)
             
-            # 옵션 추출 (API > Nuxt > DOM > 인터랙티브)
-            options = api_data.get('options') or nuxt_data.get('options') or []
-            if not options:
-                options = await self._extract_options_from_dom(page)
-            if not options:
-                options = await self._extract_options_interactive(page)
+            # 6. 이미지 추출
+            await self._scroll_for_images(page)
+            detail_images = await self._extract_product_images(page)
             
-            # 이미지 추출
-            detail_images = api_data.get('images') or nuxt_data.get('images') or []
-            dom_images = await self._extract_images_from_dom(page)
+            # 네트워크에서 수집한 이미지 추가
+            all_images = list(dict.fromkeys(detail_images + image_urls_from_network))
             
-            # 모든 이미지 소스 병합
-            all_images = list(dict.fromkeys(
-                detail_images + dom_images + image_urls_from_network
-            ))
-            
-            # 이미지 필터링 (아이콘/로고 제외)
-            filtered_images = []
-            for img in all_images:
-                if not img:
-                    continue
-                low = img.lower()
-                if any(x in low for x in ['icon', 'sprite', 'logo', 'avatar', 'badge']):
-                    continue
-                if low.endswith('.svg'):
-                    continue
-                if img.startswith('http'):
-                    filtered_images.append(img)
-            
-            # 중복 제거 및 제한
-            filtered_images = list(dict.fromkeys(filtered_images))[:80]
+            # 이미지 필터링
+            filtered_images = self._filter_product_images(all_images)
             
             print(f"✅ 크롤링 완료: {title}")
+            print(f"   - 작가: {artist_name}")
+            print(f"   - 가격: {price}")
             print(f"   - 옵션: {len(options)}개 그룹")
             print(f"   - 이미지: {len(filtered_images)}개")
             
@@ -233,350 +184,239 @@ class IdusScraper:
                 pass
             await page.close()
 
-    async def _scroll_page(self, page: Page):
-        """페이지 스크롤로 동적 컨텐츠 로딩"""
+    async def _extract_title_from_page(self, page: Page) -> str:
+        """페이지 타이틀에서 상품명 추출"""
         try:
-            # 점진적 스크롤
-            for _ in range(15):
-                await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
-                await asyncio.sleep(0.3)
-            
-            # 맨 위로 복귀
-            await page.evaluate("window.scrollTo(0, 0)")
-            await asyncio.sleep(0.5)
+            # 방법 1: 페이지 타이틀에서 추출 (가장 정확)
+            full_title = await page.title()
+            if full_title:
+                # " | 아이디어스" 제거
+                title = full_title.replace(" | 아이디어스", "").strip()
+                if title and len(title) >= 3:
+                    print(f"📌 타이틀에서 상품명 추출: {title}")
+                    return title
         except:
             pass
+        
+        # 방법 2: meta og:title에서 추출
+        try:
+            og_title = await page.evaluate("""
+                () => {
+                    const meta = document.querySelector('meta[property="og:title"]');
+                    return meta ? meta.getAttribute('content') : null;
+                }
+            """)
+            if og_title:
+                title = og_title.replace(" | 아이디어스", "").strip()
+                if title and len(title) >= 3:
+                    return title
+        except:
+            pass
+        
+        # 방법 3: h1 태그에서 추출
+        try:
+            h1 = await page.query_selector('h1')
+            if h1:
+                text = (await h1.inner_text() or "").strip()
+                if text and len(text) >= 3:
+                    return text
+        except:
+            pass
+        
+        return "제목 없음"
 
-    async def _extract_nuxt_data(self, page: Page) -> dict:
-        """Nuxt.js 페이지의 __NUXT__ 데이터 추출"""
-        result = {}
+    async def _extract_artist_name(self, page: Page) -> str:
+        """작가명 추출"""
+        try:
+            # 방법 1: href에 /artist/ 포함된 링크에서 추출
+            artist_link = await page.query_selector('a[href*="/artist/"]')
+            if artist_link:
+                text = (await artist_link.inner_text() or "").strip()
+                # 너무 긴 텍스트나 UI 텍스트 제외
+                if text and 2 <= len(text) <= 50 and "바로가기" not in text:
+                    print(f"📌 작가명 추출: {text}")
+                    return text
+        except:
+            pass
         
         try:
-            # window.__NUXT__ 또는 window.__NUXT_DATA__ 추출
-            nuxt_raw = await page.evaluate("""
+            # 방법 2: class에 artist/seller/shop 포함된 요소에서 추출
+            for sel in ['[class*="artist"]', '[class*="seller"]', '[class*="shop-name"]']:
+                el = await page.query_selector(sel)
+                if el:
+                    text = (await el.inner_text() or "").strip()
+                    if text and 2 <= len(text) <= 50:
+                        return text
+        except:
+            pass
+        
+        return "작가명 없음"
+
+    async def _extract_price(self, page: Page) -> str:
+        """가격 추출"""
+        try:
+            # 방법 1: 가격 패턴이 있는 텍스트 찾기
+            price_text = await page.evaluate("""
                 () => {
-                    if (window.__NUXT__) return JSON.stringify(window.__NUXT__);
-                    if (window.__NUXT_DATA__) return JSON.stringify(window.__NUXT_DATA__);
-                    // Nuxt 3의 경우 다른 방식으로 저장될 수 있음
-                    const scripts = document.querySelectorAll('script');
-                    for (const s of scripts) {
-                        const t = s.textContent || '';
-                        if (t.includes('__NUXT__') || t.includes('__NUXT_DATA__')) {
-                            return t;
+                    // 가격 관련 클래스를 가진 요소들에서 찾기
+                    const selectors = [
+                        '[class*="price"]',
+                        '[class*="Price"]',
+                        '[class*="cost"]',
+                        '[class*="sale"]'
+                    ];
+                    
+                    for (const sel of selectors) {
+                        const els = document.querySelectorAll(sel);
+                        for (const el of els) {
+                            const text = el.innerText || '';
+                            // 숫자,원 또는 숫자₩ 패턴 매칭
+                            const match = text.match(/[\\d,]+\\s*원|₩\\s*[\\d,]+/);
+                            if (match) {
+                                return match[0];
+                            }
                         }
+                    }
+                    
+                    // 전체 페이지에서 가격 패턴 찾기
+                    const body = document.body.innerText || '';
+                    const allPrices = body.match(/[\\d,]{4,}\\s*원/g);
+                    if (allPrices && allPrices.length > 0) {
+                        return allPrices[0];
+                    }
+                    
+                    return null;
+                }
+            """)
+            
+            if price_text:
+                return price_text.strip()
+        except:
+            pass
+        
+        return "가격 정보 없음"
+
+    async def _extract_description(self, page: Page) -> str:
+        """상품 설명 추출"""
+        try:
+            # meta description에서 추출
+            meta_desc = await page.evaluate("""
+                () => {
+                    const meta = document.querySelector('meta[name="description"]');
+                    if (meta) {
+                        return meta.getAttribute('content');
+                    }
+                    const ogDesc = document.querySelector('meta[property="og:description"]');
+                    if (ogDesc) {
+                        return ogDesc.getAttribute('content');
                     }
                     return null;
                 }
             """)
             
-            if not nuxt_raw:
-                return result
+            if meta_desc and len(meta_desc) > 20:
+                return meta_desc.strip()[:4000]
+        except:
+            pass
+        
+        try:
+            # description 클래스 요소에서 추출
+            for sel in ['[class*="description"]', '[class*="detail"]', '[class*="content"]']:
+                el = await page.query_selector(sel)
+                if el:
+                    text = (await el.inner_text() or "").strip()
+                    # UI 텍스트가 아닌 실제 설명인지 확인
+                    if len(text) > 100 and "로그인" not in text and "회원가입" not in text:
+                        return text[:4000]
+        except:
+            pass
+        
+        return "설명 없음"
+
+    async def _extract_options_complete(self, page: Page) -> list[ProductOption]:
+        """옵션 추출 - 후기 + 인터랙티브 방식 결합"""
+        options = []
+        
+        # 방법 1: 후기에서 "구매작품 :" 패턴으로 옵션 추출
+        review_options = await self._extract_options_from_reviews(page)
+        if review_options:
+            options.extend(review_options)
+            print(f"📌 후기에서 옵션 {len(review_options)}개 그룹 추출")
+        
+        # 방법 2: 인터랙티브 방식 (버튼 클릭)
+        if not options:
+            interactive_options = await self._extract_options_interactive(page)
+            if interactive_options:
+                options.extend(interactive_options)
+                print(f"📌 인터랙티브 방식으로 옵션 {len(interactive_options)}개 그룹 추출")
+        
+        return options
+
+    async def _extract_options_from_reviews(self, page: Page) -> list[ProductOption]:
+        """후기에서 옵션 정보 추출"""
+        options_dict: dict[str, set[str]] = {}
+        
+        try:
+            # 후기 텍스트에서 "구매작품 :" 패턴 찾기
+            review_texts = await page.evaluate("""
+                () => {
+                    const texts = [];
+                    // 모든 링크/텍스트에서 "구매작품" 패턴 찾기
+                    const elements = document.querySelectorAll('a, span, div, p');
+                    for (const el of elements) {
+                        const text = el.innerText || '';
+                        if (text.includes('구매작품') && text.includes(':')) {
+                            texts.push(text);
+                        }
+                    }
+                    return texts;
+                }
+            """)
             
-            # JSON 파싱 시도
-            try:
-                data = json.loads(nuxt_raw)
-            except:
-                # __NUXT__= 형식에서 추출
-                match = re.search(r'__NUXT__\s*=\s*(\{.+\})', nuxt_raw, re.DOTALL)
-                if match:
-                    try:
-                        data = json.loads(match.group(1))
-                    except:
-                        return result
-                else:
-                    return result
-            
-            # 데이터에서 필요한 정보 추출
-            result = self._extract_from_nuxt_structure(data)
-            
+            for text in review_texts:
+                # "구매작품 : 옵션명: 옵션값" 패턴 파싱
+                # 예: "구매작품 : 쿠키 선택: 용감한 쿠키 (노랑술) * 쿠키 선택: 세인트릴리 쿠키 (파랑술)"
+                if "구매작품" in text:
+                    # "구매작품 :" 이후 부분 추출
+                    parts = text.split("구매작품")
+                    for part in parts[1:]:
+                        # ": 옵션명: 옵션값" 형식 파싱
+                        # 여러 옵션이 "*"로 구분될 수 있음
+                        option_parts = part.split("*")
+                        for opt_part in option_parts:
+                            # "옵션명: 옵션값" 파싱
+                            match = re.search(r':\s*([^:]+):\s*(.+?)(?:\s*\*|$)', opt_part)
+                            if match:
+                                opt_name = match.group(1).strip()
+                                opt_value = match.group(2).strip()
+                                if opt_name and opt_value:
+                                    options_dict.setdefault(opt_name, set()).add(opt_value)
+                            else:
+                                # 단순 "옵션명: 옵션값" 형식
+                                simple_match = re.search(r':\s*([^:]+):\s*(.+)', opt_part)
+                                if simple_match:
+                                    opt_name = simple_match.group(1).strip()
+                                    opt_value = simple_match.group(2).strip()
+                                    # 다음 "*" 전까지만
+                                    opt_value = opt_value.split("*")[0].strip()
+                                    if opt_name and opt_value:
+                                        options_dict.setdefault(opt_name, set()).add(opt_value)
         except Exception as e:
-            print(f"Nuxt 데이터 추출 오류: {e}")
+            print(f"후기 옵션 추출 오류: {e}")
         
-        return result
-
-    def _extract_from_nuxt_structure(self, data: Any, depth: int = 0) -> dict:
-        """Nuxt 데이터 구조에서 상품 정보 추출"""
-        result = {}
-        
-        if depth > 10 or not data:
-            return result
-        
-        if isinstance(data, dict):
-            # 직접 키 매핑
-            for key in ['title', 'name', 'productName', 'product_name']:
-                if key in data and isinstance(data[key], str):
-                    val = data[key].strip()
-                    if 3 <= len(val) <= 200:
-                        result['title'] = val
-                        break
-            
-            for key in ['artistName', 'artist_name', 'sellerName', 'shopName', 'brandName']:
-                if key in data and isinstance(data[key], str):
-                    val = data[key].strip()
-                    if 2 <= len(val) <= 100:
-                        result['artist_name'] = val
-                        break
-            
-            for key in ['price', 'salePrice', 'finalPrice', 'sellingPrice']:
-                if key in data:
-                    val = data[key]
-                    if isinstance(val, (int, float)) and val > 0:
-                        result['price'] = f"{int(val):,}원"
-                        break
-                    elif isinstance(val, str) and val.strip():
-                        result['price'] = val.strip()
-                        break
-            
-            for key in ['description', 'content', 'detail', 'introduction']:
-                if key in data and isinstance(data[key], str):
-                    val = data[key].strip()
-                    if len(val) > 50:
-                        result['description'] = val[:6000]
-                        break
-            
-            # 옵션 추출
-            for key in ['options', 'optionGroups', 'productOptions']:
-                if key in data and isinstance(data[key], list):
-                    opts = self._parse_options_from_list(data[key])
-                    if opts:
-                        result['options'] = opts
-                        break
-            
-            # 이미지 추출
-            for key in ['images', 'detailImages', 'productImages', 'imageUrls']:
-                if key in data and isinstance(data[key], list):
-                    imgs = [img for img in data[key] if isinstance(img, str) and img.startswith('http')]
-                    if imgs:
-                        result['images'] = imgs
-                        break
-            
-            # 재귀 탐색
-            for v in data.values():
-                if not result.get('title') or not result.get('options'):
-                    sub = self._extract_from_nuxt_structure(v, depth + 1)
-                    for k, sv in sub.items():
-                        if k not in result or not result[k]:
-                            result[k] = sv
-        
-        elif isinstance(data, list):
-            for item in data[:50]:
-                sub = self._extract_from_nuxt_structure(item, depth + 1)
-                for k, sv in sub.items():
-                    if k not in result or not result[k]:
-                        result[k] = sv
-        
-        return result
-
-    def _parse_options_from_list(self, options_data: list) -> list[ProductOption]:
-        """옵션 리스트 파싱"""
-        options = []
-        
-        for opt in options_data[:20]:
-            if not isinstance(opt, dict):
-                continue
-            
-            name = (
-                opt.get('name') or
-                opt.get('optionName') or
-                opt.get('groupName') or
-                opt.get('title') or
-                opt.get('label') or
-                "옵션"
-            )
-            if isinstance(name, str):
-                name = name.strip()
-            else:
-                name = "옵션"
-            
-            values = []
-            values_data = (
-                opt.get('values') or
-                opt.get('optionValues') or
-                opt.get('items') or
-                opt.get('optionItems') or
-                []
-            )
-            
-            if isinstance(values_data, list):
-                for v in values_data[:50]:
-                    if isinstance(v, str):
-                        values.append(v.strip())
-                    elif isinstance(v, dict):
-                        val = (
-                            v.get('name') or
-                            v.get('value') or
-                            v.get('label') or
-                            v.get('optionValue') or
-                            ""
-                        )
-                        if isinstance(val, str) and val.strip():
-                            values.append(val.strip())
-            
-            # 노이즈 제거
-            values = [v for v in values if v and v not in ('선택', '선택하세요', '옵션 선택')]
-            values = list(dict.fromkeys(values))
-            
-            if values:
-                options.append(ProductOption(name=name, values=values))
-        
-        return options
-
-    def _parse_api_responses(self, responses: dict, product_uuid: Optional[str]) -> dict:
-        """캡처된 API 응답에서 데이터 추출"""
-        result = {}
-        
-        for url, data in responses.items():
-            if not isinstance(data, dict):
-                continue
-            
-            # 데이터 구조 탐색
-            payload = data.get('data') or data.get('result') or data
-            
-            if isinstance(payload, dict):
-                # 제목
-                for key in ['title', 'name', 'productName', 'product_name']:
-                    if key in payload and isinstance(payload[key], str):
-                        val = payload[key].strip()
-                        if 3 <= len(val) <= 200 and not result.get('title'):
-                            result['title'] = val
-                
-                # 작가명
-                for key in ['artistName', 'artist_name', 'sellerName', 'shopName']:
-                    if key in payload and isinstance(payload[key], str):
-                        val = payload[key].strip()
-                        if 2 <= len(val) <= 100 and not result.get('artist_name'):
-                            result['artist_name'] = val
-                
-                # 가격
-                for key in ['price', 'salePrice', 'finalPrice']:
-                    if key in payload and not result.get('price'):
-                        val = payload[key]
-                        if isinstance(val, (int, float)) and val > 0:
-                            result['price'] = f"{int(val):,}원"
-                        elif isinstance(val, str):
-                            result['price'] = val.strip()
-                
-                # 옵션
-                for key in ['options', 'optionGroups', 'productOptions']:
-                    if key in payload and isinstance(payload[key], list) and not result.get('options'):
-                        opts = self._parse_options_from_list(payload[key])
-                        if opts:
-                            result['options'] = opts
-                
-                # 이미지
-                for key in ['images', 'detailImages', 'productImages']:
-                    if key in payload and isinstance(payload[key], list) and not result.get('images'):
-                        imgs = []
-                        for img in payload[key][:80]:
-                            if isinstance(img, str) and img.startswith('http'):
-                                imgs.append(img)
-                            elif isinstance(img, dict):
-                                img_url = img.get('url') or img.get('imageUrl') or img.get('src')
-                                if isinstance(img_url, str) and img_url.startswith('http'):
-                                    imgs.append(img_url)
-                        if imgs:
-                            result['images'] = imgs
-        
-        return result
-
-    async def _extract_from_dom(self, page: Page) -> dict:
-        """DOM에서 기본 정보 추출"""
-        result = {}
-        
-        # 제목
-        for sel in ['h1', '[class*="title"]', '[class*="product-name"]']:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    text = (await el.inner_text() or "").strip()
-                    if 3 <= len(text) <= 200:
-                        result['title'] = text
-                        break
-            except:
-                continue
-        
-        # 작가명
-        for sel in ['[class*="artist"]', '[class*="seller"]', '[class*="shop-name"]', 'a[href*="/artist/"]']:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    text = (await el.inner_text() or "").strip()
-                    if 2 <= len(text) <= 100:
-                        result['artist_name'] = text
-                        break
-            except:
-                continue
-        
-        # 가격
-        try:
-            els = await page.query_selector_all('[class*="price"]')
-            for el in els:
-                text = (await el.inner_text() or "").strip()
-                if re.search(r'[\d,]+\s*(원|₩)', text):
-                    result['price'] = text
-                    break
-        except:
-            pass
-        
-        # 설명 (긴 텍스트 블록 찾기)
-        for sel in ['[class*="description"]', '[class*="detail"]', '[class*="content"]', 'article']:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    text = (await el.inner_text() or "").strip()
-                    if len(text) > 100:
-                        result['description'] = text[:6000]
-                        break
-            except:
-                continue
-        
-        return result
-
-    async def _extract_options_from_dom(self, page: Page) -> list[ProductOption]:
-        """DOM에서 옵션 추출"""
-        options = []
-        
-        # select 요소에서 옵션 추출
-        try:
-            selects = await page.query_selector_all('select')
-            for idx, sel in enumerate(selects):
-                opt_els = await sel.query_selector_all('option')
-                values = []
-                for opt in opt_els:
-                    text = (await opt.inner_text() or "").strip()
-                    if text and text not in ('선택', '선택하세요', '옵션 선택', '옵션을 선택해주세요'):
-                        values.append(text)
-                values = list(dict.fromkeys(values))
-                if values:
-                    options.append(ProductOption(name=f"옵션 {idx+1}", values=values))
-        except:
-            pass
-        
-        # role="listbox" 또는 role="option"에서 추출
-        try:
-            listboxes = await page.query_selector_all('[role="listbox"], [role="combobox"]')
-            for idx, lb in enumerate(listboxes):
-                opt_els = await lb.query_selector_all('[role="option"]')
-                values = []
-                for opt in opt_els:
-                    text = (await opt.inner_text() or "").strip()
-                    if text and len(text) <= 100:
-                        values.append(text)
-                values = list(dict.fromkeys(values))
-                if values and len(values) >= 2:
-                    options.append(ProductOption(name=f"옵션 {len(options)+1}", values=values))
-        except:
-            pass
-        
-        return options
+        # dict를 ProductOption 리스트로 변환
+        return [
+            ProductOption(name=name, values=list(values))
+            for name, values in options_dict.items()
+            if values
+        ]
 
     async def _extract_options_interactive(self, page: Page) -> list[ProductOption]:
-        """인터랙티브 방식으로 옵션 추출 (버튼 클릭)"""
+        """인터랙티브 방식으로 옵션 추출"""
         options = []
         
-        # 옵션 선택 트리거 찾기 및 클릭
+        # 옵션 선택 트리거 클릭 시도
         triggers = [
-            'text=/옵션.*선택/i',
             'button:has-text("옵션")',
             'button:has-text("선택")',
             '[aria-haspopup="listbox"]',
@@ -587,12 +427,16 @@ class IdusScraper:
             try:
                 el = await page.query_selector(trigger)
                 if el:
-                    # 클릭하여 옵션 패널 열기
+                    # 요소가 화면에 보이는지 확인
+                    box = await el.bounding_box()
+                    if not box:
+                        continue
+                    
                     await el.click()
                     await asyncio.sleep(0.8)
                     
-                    # 열린 패널에서 옵션 수집
-                    panel_options = await self._collect_options_from_panel(page)
+                    # 옵션 패널에서 값 수집
+                    panel_options = await self._collect_real_options(page)
                     if panel_options:
                         options.extend(panel_options)
                     
@@ -608,182 +452,204 @@ class IdusScraper:
             except:
                 continue
         
-        # 옵션 그룹 라벨 클릭 시도 (예: "1. 쿠키 선택")
-        if not options:
-            try:
-                group_labels = await page.query_selector_all('text=/^\\s*\\d+\\./i')
-                for gl in group_labels[:5]:
-                    try:
-                        group_text = (await gl.inner_text() or "").strip()
-                        await gl.click()
-                        await asyncio.sleep(0.6)
-                        
-                        panel_options = await self._collect_options_from_panel(page)
-                        if panel_options:
-                            # 그룹명 설정
-                            group_name = re.sub(r'^\s*\d+\.?\s*', '', group_text).strip() or "옵션"
-                            for opt in panel_options:
-                                opt.name = group_name
-                            options.extend(panel_options)
-                        
-                        await page.keyboard.press("Escape")
-                        await asyncio.sleep(0.3)
-                    except:
-                        continue
-            except:
-                pass
-        
-        # 중복 제거
-        merged = {}
-        for opt in options:
-            merged.setdefault(opt.name, [])
-            merged[opt.name].extend(opt.values)
-        
-        return [
-            ProductOption(name=name, values=list(dict.fromkeys(vals)))
-            for name, vals in merged.items()
-            if vals
-        ]
-
-    async def _collect_options_from_panel(self, page: Page) -> list[ProductOption]:
-        """열린 옵션 패널에서 옵션 값 수집"""
-        options = []
-        
-        # 패널/다이얼로그/시트 찾기
-        panel_selectors = [
-            '[role="dialog"]',
-            '[role="listbox"]',
-            '[class*="modal"]',
-            '[class*="sheet"]',
-            '[class*="bottom"]',
-            '[class*="dropdown"]',
-            '[class*="popup"]',
-        ]
-        
-        panel = None
-        for sel in panel_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    # 실제로 보이는지 확인
-                    box = await el.bounding_box()
-                    if box and box['height'] > 50:
-                        panel = el
-                        break
-            except:
-                continue
-        
-        search_root = panel if panel else page
-        
-        # 옵션 아이템 수집
-        option_selectors = [
-            '[role="option"]',
-            'li',
-            'button',
-            '[class*="option-item"]',
-            '[class*="item"]',
-        ]
-        
-        values = []
-        for sel in option_selectors:
-            try:
-                items = await search_root.query_selector_all(sel)
-                for item in items[:80]:
-                    text = (await item.inner_text() or "").strip()
-                    if not text:
-                        continue
-                    # 멀티라인이면 첫 줄만
-                    if '\n' in text:
-                        text = text.split('\n')[0].strip()
-                    # 노이즈 필터링
-                    if text in ('선택', '선택하세요', '옵션 선택', '장바구니', '구매하기', '선물하기'):
-                        continue
-                    if '옵션을 선택' in text:
-                        continue
-                    if len(text) > 100:
-                        continue
-                    values.append(text)
-                
-                values = list(dict.fromkeys(values))
-                if len(values) >= 2:
-                    break
-            except:
-                continue
-        
-        if values:
-            options.append(ProductOption(name="옵션", values=values))
-        
         return options
 
-    async def _extract_images_from_dom(self, page: Page) -> list[str]:
-        """DOM에서 이미지 URL 추출"""
-        images = []
+    async def _collect_real_options(self, page: Page) -> list[ProductOption]:
+        """실제 옵션 값만 수집 (UI 노이즈 제외)"""
+        options = []
+        
+        # UI 노이즈 텍스트 목록
+        noise_texts = {
+            '아이디어스 앱 설치하기', '전송', '로그인', '회원가입', '고객센터',
+            '관심', '내 정보', '도움이 돼요', '등록', '아이디어스 채팅 상담',
+            '선택', '선택하세요', '옵션 선택', '장바구니', '구매하기', '선물하기',
+            '옵션을 선택해주세요', '필수', '선택완료', '확인', '취소', '닫기'
+        }
         
         try:
-            # img 태그에서 추출
-            img_els = await page.query_selector_all('img')
-            for img in img_els:
-                # src 속성들 확인
-                for attr in ['src', 'data-src', 'data-lazy-src', 'data-original']:
-                    try:
-                        val = await img.get_attribute(attr)
-                        if val and val.startswith('http'):
-                            images.append(val)
-                            break
-                    except:
-                        continue
-                
-                # srcset 처리
-                try:
-                    srcset = await img.get_attribute('srcset')
-                    if srcset:
-                        # 가장 큰 이미지 선택
-                        parts = [p.strip().split()[0] for p in srcset.split(',') if p.strip()]
-                        if parts:
-                            images.append(parts[-1])
-                except:
-                    pass
+            # 다이얼로그/시트/드롭다운 찾기
+            panel_selectors = [
+                '[role="dialog"]',
+                '[role="listbox"]',
+                '[class*="modal"]',
+                '[class*="sheet"]',
+                '[class*="bottom"]',
+                '[class*="dropdown"]',
+            ]
             
-            # source 태그 (picture 요소)
-            source_els = await page.query_selector_all('source')
-            for src in source_els:
+            panel = None
+            for sel in panel_selectors:
                 try:
-                    srcset = await src.get_attribute('srcset')
-                    if srcset:
-                        parts = [p.strip().split()[0] for p in srcset.split(',') if p.strip()]
-                        if parts:
-                            images.append(parts[-1])
+                    el = await page.query_selector(sel)
+                    if el:
+                        box = await el.bounding_box()
+                        if box and box['height'] > 100:
+                            panel = el
+                            break
                 except:
                     continue
             
-            # background-image 스타일에서 추출
-            try:
-                bg_images = await page.evaluate("""
-                    () => {
-                        const urls = [];
-                        const elements = document.querySelectorAll('[style*="background"]');
-                        elements.forEach(el => {
-                            const style = el.getAttribute('style') || '';
-                            const matches = style.match(/url\\(['\"]?(https?:\\/\\/[^'\"\\)]+)['\"]?\\)/gi);
-                            if (matches) {
-                                matches.forEach(m => {
-                                    const url = m.replace(/url\\(['\"]?|['\"]?\\)/gi, '');
-                                    urls.push(url);
-                                });
-                            }
-                        });
-                        return urls;
-                    }
-                """)
-                images.extend(bg_images or [])
-            except:
-                pass
+            if not panel:
+                return options
+            
+            # 옵션 아이템 수집
+            items = await panel.query_selector_all('[role="option"], li, button')
+            
+            values = []
+            for item in items[:50]:
+                try:
+                    text = (await item.inner_text() or "").strip()
+                    if not text:
+                        continue
+                    
+                    # 멀티라인이면 첫 줄만
+                    if '\n' in text:
+                        text = text.split('\n')[0].strip()
+                    
+                    # 노이즈 필터링
+                    if text in noise_texts:
+                        continue
+                    if any(noise in text for noise in ['로그인', '회원가입', '설치하기', '고객센터']):
+                        continue
+                    if len(text) > 80:
+                        continue
+                    if len(text) < 2:
+                        continue
+                    
+                    values.append(text)
+                except:
+                    continue
+            
+            values = list(dict.fromkeys(values))
+            
+            if values and len(values) >= 2:
+                options.append(ProductOption(name="옵션", values=values))
+        
+        except Exception as e:
+            print(f"옵션 수집 오류: {e}")
+        
+        return options
+
+    async def _scroll_for_images(self, page: Page):
+        """이미지 로딩을 위한 스크롤"""
+        try:
+            for _ in range(20):
+                await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
+                await asyncio.sleep(0.25)
+            
+            await page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(0.5)
+        except:
+            pass
+
+    async def _extract_product_images(self, page: Page) -> list[str]:
+        """상품 이미지 URL 추출"""
+        images = []
+        
+        try:
+            # JavaScript로 모든 이미지 URL 추출
+            all_images = await page.evaluate("""
+                () => {
+                    const urls = new Set();
+                    
+                    // img 태그에서 추출
+                    document.querySelectorAll('img').forEach(img => {
+                        // src
+                        if (img.src && img.src.startsWith('http')) {
+                            urls.add(img.src);
+                        }
+                        // data-src (lazy loading)
+                        const dataSrc = img.getAttribute('data-src');
+                        if (dataSrc && dataSrc.startsWith('http')) {
+                            urls.add(dataSrc);
+                        }
+                        // srcset
+                        const srcset = img.getAttribute('srcset');
+                        if (srcset) {
+                            srcset.split(',').forEach(part => {
+                                const url = part.trim().split(' ')[0];
+                                if (url && url.startsWith('http')) {
+                                    urls.add(url);
+                                }
+                            });
+                        }
+                    });
+                    
+                    // source 태그에서 추출
+                    document.querySelectorAll('source').forEach(src => {
+                        const srcset = src.getAttribute('srcset');
+                        if (srcset) {
+                            srcset.split(',').forEach(part => {
+                                const url = part.trim().split(' ')[0];
+                                if (url && url.startsWith('http')) {
+                                    urls.add(url);
+                                }
+                            });
+                        }
+                    });
+                    
+                    // background-image에서 추출
+                    document.querySelectorAll('[style*="background"]').forEach(el => {
+                        const style = el.getAttribute('style') || '';
+                        const matches = style.match(/url\\(['\"]?(https?:\\/\\/[^'\"\\)]+)['\"]?\\)/gi);
+                        if (matches) {
+                            matches.forEach(m => {
+                                const url = m.replace(/url\\(['\"]?|['\"]?\\)/gi, '');
+                                urls.add(url);
+                            });
+                        }
+                    });
+                    
+                    return Array.from(urls);
+                }
+            """)
+            
+            images = all_images or []
             
         except Exception as e:
-            print(f"DOM 이미지 추출 오류: {e}")
+            print(f"이미지 추출 오류: {e}")
         
-        # 중복 제거
-        return list(dict.fromkeys(images))
+        return images
+
+    def _filter_product_images(self, images: list[str]) -> list[str]:
+        """상품 관련 이미지만 필터링"""
+        filtered = []
+        
+        # 제외할 패턴
+        exclude_patterns = [
+            'icon', 'sprite', 'logo', 'avatar', 'badge', 'emoji',
+            'button', 'arrow', 'check', 'close', 'menu', 'search',
+            'facebook', 'twitter', 'instagram', 'kakao', 'naver',
+            'google', 'apple', 'play', 'app-store',
+            'banner-image', 'escrow', 'membership'
+        ]
+        
+        for img in images:
+            if not img or not img.startswith('http'):
+                continue
+            
+            low = img.lower()
+            
+            # SVG 제외
+            if low.endswith('.svg'):
+                continue
+            
+            # 아이콘/로고 등 제외
+            if any(pattern in low for pattern in exclude_patterns):
+                continue
+            
+            # Idus 상품 이미지 CDN 패턴 확인
+            if 'idus' in low or 'image.idus.com' in low:
+                # 너무 작은 썸네일 제외 (100px 이하)
+                if '_100.' in low or '/100.' in low:
+                    continue
+                filtered.append(img)
+            elif any(ext in low for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                filtered.append(img)
+        
+        # 중복 제거 및 제한
+        filtered = list(dict.fromkeys(filtered))
+        return filtered[:80]
 
 
 # 테스트용 코드
@@ -796,6 +662,7 @@ if __name__ == "__main__":
         
         try:
             result = await scraper.scrape_product(test_url)
+            print(f"\n===== 결과 =====")
             print(f"제목: {result.title}")
             print(f"작가: {result.artist_name}")
             print(f"가격: {result.price}")

@@ -7,10 +7,14 @@ echo   Git Commit and Push
 echo ========================================
 
 git add .
-git commit -m "refactor: API-based Idus scraper with Nuxt.js support"
+git status
+echo.
+echo Committing changes...
+git commit -m "fix: Improve scraper - use page title for product name, filter UI noise from options, add OCR debug logs"
+echo.
+echo Pushing to remote...
 git push
 
 echo.
 echo Done!
 pause
-

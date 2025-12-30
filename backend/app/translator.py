@@ -195,12 +195,27 @@ Korean text to translate:
         lang_name = self._get_language_name(target_language)
         
         max_images = int(os.getenv("MAX_OCR_IMAGES", "20"))
-        for url in image_urls[:max_images]:  # 기본 최대 20개 이미지만 처리
+        images_to_process = image_urls[:max_images]
+        
+        print(f"🖼️ OCR 처리 시작: {len(images_to_process)}개 이미지 (전체 {len(image_urls)}개 중)")
+        
+        processed = 0
+        success = 0
+        no_text = 0
+        errors = 0
+        
+        for idx, url in enumerate(images_to_process):
             try:
+                processed += 1
+                print(f"  [{idx+1}/{len(images_to_process)}] OCR 처리 중: {url[:80]}...")
+                
                 # 이미지에서 텍스트 추출
                 ocr_result = await self._extract_text_from_image(url)
                 
                 if ocr_result and ocr_result.strip():
+                    success += 1
+                    print(f"    ✅ 텍스트 발견: {len(ocr_result)}자")
+                    
                     # 추출된 텍스트 번역
                     translated = await self._translate_text(
                         ocr_result,
@@ -213,10 +228,16 @@ Korean text to translate:
                         original_text=ocr_result,
                         translated_text=translated
                     ))
+                else:
+                    no_text += 1
+                    print(f"    ⬜ 텍스트 없음")
                     
             except Exception as e:
-                print(f"이미지 처리 오류 ({url}): {e}")
+                errors += 1
+                print(f"    ❌ 오류: {e}")
                 continue
+        
+        print(f"🖼️ OCR 완료: 처리={processed}, 성공={success}, 텍스트없음={no_text}, 오류={errors}")
         
         return results
     
