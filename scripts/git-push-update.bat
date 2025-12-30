@@ -10,7 +10,7 @@ git add .
 git status
 echo.
 echo Committing changes...
-git commit -m "fix: Improve scraper - use page title for product name, filter UI noise from options, add OCR debug logs"
+git commit -m "feat: Upgrade to Gemini 2.5 Flash, improve OCR image filtering"
 echo.
 echo Pushing to remote...
 git push

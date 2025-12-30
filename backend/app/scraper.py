@@ -543,77 +543,98 @@ class IdusScraper:
             pass
 
     async def _extract_product_images(self, page: Page) -> list[str]:
-        """상품 이미지 URL 추출"""
-        images = []
+        """상품 상세 이미지 URL 추출 - 텍스트가 포함된 설명 이미지 우선"""
+        detail_images = []
+        all_images = []
         
         try:
-            # JavaScript로 모든 이미지 URL 추출
-            all_images = await page.evaluate("""
+            # 1. 상품 상세/설명 영역의 이미지 우선 추출 (텍스트가 있을 가능성 높음)
+            detail_images = await page.evaluate("""
                 () => {
-                    const urls = new Set();
+                    const urls = [];
                     
-                    // img 태그에서 추출
-                    document.querySelectorAll('img').forEach(img => {
-                        // src
-                        if (img.src && img.src.startsWith('http')) {
-                            urls.add(img.src);
-                        }
-                        // data-src (lazy loading)
-                        const dataSrc = img.getAttribute('data-src');
-                        if (dataSrc && dataSrc.startsWith('http')) {
-                            urls.add(dataSrc);
-                        }
-                        // srcset
-                        const srcset = img.getAttribute('srcset');
-                        if (srcset) {
-                            srcset.split(',').forEach(part => {
-                                const url = part.trim().split(' ')[0];
-                                if (url && url.startsWith('http')) {
-                                    urls.add(url);
+                    // 상세 설명 영역 셀렉터들
+                    const detailSelectors = [
+                        '[class*="detail"]',
+                        '[class*="description"]', 
+                        '[class*="content"]',
+                        '[class*="info"]',
+                        '[class*="story"]',
+                        'article',
+                        'main',
+                    ];
+                    
+                    // 상세 영역에서 이미지 찾기
+                    for (const selector of detailSelectors) {
+                        const containers = document.querySelectorAll(selector);
+                        containers.forEach(container => {
+                            // 컨테이너 내부의 이미지들
+                            container.querySelectorAll('img').forEach(img => {
+                                // 이미지 크기 확인 (충분히 큰 이미지만)
+                                const width = img.naturalWidth || img.width || 0;
+                                const height = img.naturalHeight || img.height || 0;
+                                
+                                // 400px 이상의 이미지만 (텍스트가 있는 설명 이미지일 가능성)
+                                if (width >= 400 || height >= 400) {
+                                    const src = img.src || img.getAttribute('data-src');
+                                    if (src && src.startsWith('http')) {
+                                        urls.push(src);
+                                    }
                                 }
                             });
-                        }
-                    });
+                        });
+                    }
                     
-                    // source 태그에서 추출
-                    document.querySelectorAll('source').forEach(src => {
-                        const srcset = src.getAttribute('srcset');
-                        if (srcset) {
-                            srcset.split(',').forEach(part => {
-                                const url = part.trim().split(' ')[0];
-                                if (url && url.startsWith('http')) {
-                                    urls.add(url);
-                                }
-                            });
-                        }
-                    });
-                    
-                    // background-image에서 추출
-                    document.querySelectorAll('[style*="background"]').forEach(el => {
-                        const style = el.getAttribute('style') || '';
-                        const matches = style.match(/url\\(['\"]?(https?:\\/\\/[^'\"\\)]+)['\"]?\\)/gi);
-                        if (matches) {
-                            matches.forEach(m => {
-                                const url = m.replace(/url\\(['\"]?|['\"]?\\)/gi, '');
-                                urls.add(url);
-                            });
-                        }
-                    });
-                    
-                    return Array.from(urls);
+                    return urls;
                 }
             """)
             
-            images = all_images or []
+            # 2. 모든 이미지 URL 수집 (폴백)
+            all_images = await page.evaluate("""
+                () => {
+                    const urls = [];
+                    
+                    document.querySelectorAll('img').forEach(img => {
+                        const src = img.src || img.getAttribute('data-src');
+                        if (src && src.startsWith('http')) {
+                            urls.push(src);
+                        }
+                        
+                        // srcset에서 가장 큰 이미지
+                        const srcset = img.getAttribute('srcset');
+                        if (srcset) {
+                            const parts = srcset.split(',');
+                            let maxUrl = '';
+                            let maxWidth = 0;
+                            parts.forEach(part => {
+                                const [url, size] = part.trim().split(' ');
+                                const w = parseInt(size) || 0;
+                                if (w > maxWidth) {
+                                    maxWidth = w;
+                                    maxUrl = url;
+                                }
+                            });
+                            if (maxUrl) urls.push(maxUrl);
+                        }
+                    });
+                    
+                    return urls;
+                }
+            """)
             
         except Exception as e:
             print(f"이미지 추출 오류: {e}")
         
-        return images
+        # 상세 이미지 우선, 나머지 이미지 추가
+        combined = list(dict.fromkeys(detail_images + all_images))
+        print(f"📷 이미지 수집: 상세영역 {len(detail_images)}개, 전체 {len(all_images)}개")
+        
+        return combined
 
     def _filter_product_images(self, images: list[str]) -> list[str]:
-        """상품 관련 이미지만 필터링"""
-        filtered = []
+        """상품 관련 이미지만 필터링 - OCR 대상 이미지 우선"""
+        detail_images = []  # 상세 설명 이미지 (텍스트 있을 가능성 높음)
+        product_images = []  # 상품 이미지
         
         # 제외할 패턴
         exclude_patterns = [
@@ -621,7 +642,15 @@ class IdusScraper:
             'button', 'arrow', 'check', 'close', 'menu', 'search',
             'facebook', 'twitter', 'instagram', 'kakao', 'naver',
             'google', 'apple', 'play', 'app-store',
-            'banner-image', 'escrow', 'membership'
+            'banner-image', 'escrow', 'membership', 'profile',
+            'thumbnail', 'thumb', '_50.', '_100.', '_150.', '_200.',
+            '/50/', '/100/', '/150/', '/200/'
+        ]
+        
+        # 상세 이미지 패턴 (텍스트가 있을 가능성이 높은 이미지)
+        detail_patterns = [
+            'detail', 'description', 'content', 'info', 'story',
+            'explain', 'guide', 'manual', 'spec'
         ]
         
         for img in images:
@@ -634,22 +663,28 @@ class IdusScraper:
             if low.endswith('.svg'):
                 continue
             
-            # 아이콘/로고 등 제외
+            # 아이콘/로고/작은 이미지 등 제외
             if any(pattern in low for pattern in exclude_patterns):
                 continue
             
-            # Idus 상품 이미지 CDN 패턴 확인
-            if 'idus' in low or 'image.idus.com' in low:
-                # 너무 작은 썸네일 제외 (100px 이하)
-                if '_100.' in low or '/100.' in low:
-                    continue
-                filtered.append(img)
-            elif any(ext in low for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
-                filtered.append(img)
+            # Idus CDN 이미지
+            is_idus = 'idus' in low or 'image.idus.com' in low
+            
+            # 상세 이미지 패턴 확인
+            is_detail = any(pattern in low for pattern in detail_patterns)
+            
+            if is_idus or any(ext in low for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                if is_detail:
+                    detail_images.append(img)
+                else:
+                    product_images.append(img)
         
-        # 중복 제거 및 제한
-        filtered = list(dict.fromkeys(filtered))
-        return filtered[:80]
+        # 상세 이미지 우선, 나머지 상품 이미지 추가
+        combined = list(dict.fromkeys(detail_images + product_images))
+        
+        print(f"📷 필터링 결과: 상세이미지 {len(detail_images)}개, 상품이미지 {len(product_images)}개")
+        
+        return combined[:80]
 
 
 # 테스트용 코드

@@ -21,6 +21,13 @@ from .models import (
 class ProductTranslator:
     """Google Gemini를 사용한 상품 번역기"""
     
+    # 사용 가능한 Gemini 모델 목록 (우선순위 순)
+    AVAILABLE_MODELS = [
+        'gemini-2.5-flash-preview-05-20',  # Gemini 3 Flash (최신)
+        'gemini-2.0-flash',                 # Gemini 2.0 Flash (안정)
+        'gemini-1.5-flash',                 # Gemini 1.5 Flash (가장 안정)
+    ]
+    
     def __init__(self, api_key: Optional[str] = None):
         """
         Args:
@@ -29,10 +36,25 @@ class ProductTranslator:
         self.api_key = api_key
         if api_key:
             genai.configure(api_key=api_key)
-            # Gemini 2.0 Flash 모델 사용 (빠르고 비용 효율적)
-            self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
-            # Vision 기능이 필요한 경우 동일 모델 사용
-            self.vision_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            
+            # 최신 모델부터 시도하여 사용 가능한 모델 선택
+            self.model = None
+            self.vision_model = None
+            
+            for model_name in self.AVAILABLE_MODELS:
+                try:
+                    test_model = genai.GenerativeModel(model_name)
+                    # 모델 테스트 (간단한 요청)
+                    self.model = test_model
+                    self.vision_model = test_model
+                    print(f"✅ Gemini 모델 초기화 성공: {model_name}")
+                    break
+                except Exception as e:
+                    print(f"⚠️ 모델 {model_name} 사용 불가: {e}")
+                    continue
+            
+            if not self.model:
+                print("❌ 사용 가능한 Gemini 모델이 없습니다")
         else:
             self.model = None
             self.vision_model = None
@@ -251,16 +273,15 @@ Korean text to translate:
         Returns:
             추출된 텍스트 또는 None
         """
-        prompt = """You are an OCR specialist. Extract ALL Korean text visible in this product detail image.
+        prompt = """이 이미지에서 모든 한국어 텍스트를 추출해주세요.
 
-Guidelines:
-- Extract text exactly as it appears
-- Include headings, descriptions, specifications, care instructions
-- Preserve line breaks for readability
-- If there's no text in the image, respond with "NO_TEXT"
-- Do not describe the image, only extract the text
+규칙:
+- 이미지에 보이는 모든 텍스트를 정확히 추출
+- 제목, 설명, 사양, 사용법, 주의사항 등 모두 포함
+- 텍스트가 전혀 없는 이미지(상품 사진만 있는 경우)는 "NO_TEXT"만 응답
+- 이미지 설명은 하지 말고, 텍스트만 추출
 
-이 이미지에서 모든 한국어 텍스트를 추출해주세요."""
+Extract all Korean text from this product detail image. If there's no readable text (just product photos), respond with "NO_TEXT" only."""
 
         try:
             if not self.vision_model:
