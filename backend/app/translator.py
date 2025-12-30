@@ -1,7 +1,8 @@
 """
 Google Gemini 기반 번역 및 OCR 모듈
-새로운 google-genai 라이브러리 사용
+새로운 google-genai 라이브러리 사용 + Rate Limiting
 """
+import asyncio
 import base64
 import httpx
 import os
@@ -22,13 +23,18 @@ from .models import (
 
 
 class ProductTranslator:
-    """Google Gemini를 사용한 상품 번역기"""
+    """Google Gemini를 사용한 상품 번역기 (Rate Limiting 적용)"""
     
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key
         self.client = None
         self._initialized = False
         self._model_name = None
+        
+        # Rate Limiting 설정
+        self._request_delay = 6.5  # 초 (분당 10회 = 6초 간격, 여유분 추가)
+        self._last_request_time = 0
+        self._max_retries = 3
         
         if api_key:
             self._initialize_client(api_key)
@@ -40,23 +46,21 @@ class ProductTranslator:
         try:
             print(f"🔧 Gemini API 초기화 중... (키 길이: {len(api_key)})")
             
-            # 새로운 방식: Client 생성
             self.client = genai.Client(api_key=api_key)
             
-            # 사용 가능한 모델 목록 확인 및 테스트
+            # 모델 우선순위 (높은 quota 모델 우선)
             model_candidates = [
+                "gemini-2.5-flash-preview-05-20",  # 권장: 높은 quota
                 "gemini-2.0-flash",
                 "gemini-2.0-flash-exp", 
                 "gemini-1.5-flash",
                 "gemini-1.5-pro",
-                "gemini-pro",
             ]
             
             for model_name in model_candidates:
                 try:
                     print(f"🔄 모델 시도: {model_name}")
                     
-                    # 테스트 호출
                     response = self.client.models.generate_content(
                         model=model_name,
                         contents="Say OK"
@@ -81,6 +85,19 @@ class ProductTranslator:
         except Exception as e:
             print(f"❌ Gemini 초기화 실패: {e}")
             traceback.print_exc()
+    
+    async def _wait_for_rate_limit(self):
+        """Rate Limit을 위한 대기"""
+        import time
+        current_time = time.time()
+        elapsed = current_time - self._last_request_time
+        
+        if elapsed < self._request_delay:
+            wait_time = self._request_delay - elapsed
+            print(f"   ⏳ Rate Limit 대기: {wait_time:.1f}초")
+            await asyncio.sleep(wait_time)
+        
+        self._last_request_time = time.time()
     
     def _get_language_name(self, lang: TargetLanguage) -> str:
         return {
@@ -112,26 +129,27 @@ class ProductTranslator:
         
         # 1. 제목 번역
         print(f"📝 제목 번역: {product_data.title[:30]}...")
-        translated_title = self._translate_text(
+        translated_title = await self._translate_text_with_retry(
             product_data.title, target_language, "상품명"
         )
         
         # 2. 설명 번역
         print(f"📝 설명 번역: {len(product_data.description)}자")
-        translated_description = self._translate_text(
+        translated_description = await self._translate_text_with_retry(
             product_data.description, target_language, "상품 설명"
         )
         
         # 3. 옵션 번역
         print(f"📝 옵션 번역: {len(product_data.options)}개")
-        translated_options = self._translate_options(
+        translated_options = await self._translate_options(
             product_data.options, target_language
         )
         
-        # 4. OCR
-        print(f"📝 OCR: {len(product_data.detail_images)}개 이미지")
+        # 4. OCR (Rate Limit 고려하여 제한)
+        max_ocr = int(os.getenv("MAX_OCR_IMAGES", "5"))  # 기본값 5개로 줄임
+        print(f"📝 OCR: {len(product_data.detail_images)}개 이미지 중 최대 {max_ocr}개 처리")
         translated_image_texts = await self._process_images(
-            product_data.detail_images, target_language
+            product_data.detail_images[:max_ocr], target_language
         )
         
         print(f"✅ 번역 완료!")
@@ -145,13 +163,34 @@ class ProductTranslator:
             target_language=target_language
         )
     
-    def _translate_text(self, text: str, target_language: TargetLanguage, context: str = "") -> str:
-        """텍스트 번역"""
+    async def _translate_text_with_retry(
+        self, text: str, target_language: TargetLanguage, context: str = ""
+    ) -> str:
+        """Rate Limit과 재시도를 포함한 번역"""
         if not text or not text.strip():
             return text
         if text in ["제목 없음", "설명 없음", "가격 정보 없음", "작가명 없음"]:
             return text
         
+        for attempt in range(self._max_retries):
+            try:
+                await self._wait_for_rate_limit()
+                return self._translate_text(text, target_language, context)
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    # 429 에러: 더 오래 대기
+                    wait_time = (attempt + 1) * 12  # 12초, 24초, 36초
+                    print(f"   ⏳ Rate Limit 초과, {wait_time}초 대기 후 재시도...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"   ❌ 번역 실패: {e}")
+                    return text
+        
+        return text
+    
+    def _translate_text(self, text: str, target_language: TargetLanguage, context: str = "") -> str:
+        """텍스트 번역 (단순 호출)"""
         lang = self._get_language_name(target_language)
         
         prompt = f"""Translate this Korean text to {lang}. Output only the translation, nothing else.
@@ -160,60 +199,67 @@ Korean: {text}
 
 {lang}:"""
 
-        try:
-            response = self.client.models.generate_content(
-                model=self._model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    max_output_tokens=4000,
-                )
+        response = self.client.models.generate_content(
+            model=self._model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=4000,
             )
-            
-            if response and response.text:
-                result = response.text.strip()
-                # 접두사 제거
-                for prefix in [f"{lang}:", "Translation:", "번역:"]:
-                    if result.startswith(prefix):
-                        result = result[len(prefix):].strip()
-                print(f"   ✅ 번역 성공")
-                return result
-            
-            return text
-            
-        except Exception as e:
-            print(f"   ❌ 번역 실패: {e}")
-            return text
+        )
+        
+        if response and response.text:
+            result = response.text.strip()
+            for prefix in [f"{lang}:", "Translation:", "번역:"]:
+                if result.startswith(prefix):
+                    result = result[len(prefix):].strip()
+            print(f"   ✅ 번역 성공")
+            return result
+        
+        return text
     
-    def _translate_options(
+    async def _translate_options(
         self, options: list[ProductOption], target_language: TargetLanguage
     ) -> list[ProductOption]:
         """옵션 번역"""
         result = []
         for opt in options:
             try:
-                name = self._translate_text(opt.name, target_language, "옵션명")
-                values = [self._translate_text(v, target_language, "옵션값") for v in opt.values]
+                name = await self._translate_text_with_retry(opt.name, target_language, "옵션명")
+                values = []
+                for v in opt.values:
+                    translated_v = await self._translate_text_with_retry(v, target_language, "옵션값")
+                    values.append(translated_v)
                 result.append(ProductOption(name=name, values=values))
-            except:
+            except Exception as e:
+                print(f"   ❌ 옵션 번역 실패: {e}")
                 result.append(opt)
         return result
     
     async def _process_images(
         self, image_urls: list[str], target_language: TargetLanguage
     ) -> list[ImageText]:
-        """이미지 OCR"""
+        """이미지 OCR (Rate Limit 적용)"""
         results = []
-        max_images = int(os.getenv("MAX_OCR_IMAGES", "10"))
         
-        for idx, url in enumerate(image_urls[:max_images]):
+        for idx, url in enumerate(image_urls):
             try:
-                print(f"   [{idx+1}] OCR: {url[:50]}...")
-                ocr_text = await self._ocr_image(url)
+                print(f"   [{idx+1}/{len(image_urls)}] OCR: {url[:50]}...")
+                
+                # Rate Limit 대기
+                await self._wait_for_rate_limit()
+                
+                # OCR with retry
+                ocr_text = await self._ocr_image_with_retry(url)
                 
                 if ocr_text and len(ocr_text) > 10:
                     print(f"      ✅ 텍스트 발견: {len(ocr_text)}자")
-                    translated = self._translate_text(ocr_text, target_language, "이미지 텍스트")
+                    
+                    # 번역
+                    translated = await self._translate_text_with_retry(
+                        ocr_text, target_language, "이미지 텍스트"
+                    )
+                    
                     results.append(ImageText(
                         image_url=url,
                         original_text=ocr_text,
@@ -221,10 +267,26 @@ Korean: {text}
                     ))
                 else:
                     print(f"      ⬜ 텍스트 없음")
+                    
             except Exception as e:
-                print(f"      ❌ 오류: {e}")
+                print(f"      ❌ OCR 오류: {e}")
         
         return results
+    
+    async def _ocr_image_with_retry(self, image_url: str) -> Optional[str]:
+        """재시도 로직이 포함된 OCR"""
+        for attempt in range(self._max_retries):
+            try:
+                return await self._ocr_image(image_url)
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    wait_time = (attempt + 1) * 12
+                    print(f"      ⏳ Rate Limit, {wait_time}초 대기...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise e
+        return None
     
     async def _ocr_image(self, image_url: str) -> Optional[str]:
         """이미지 OCR"""
@@ -245,7 +307,6 @@ Korean: {text}
             elif "webp" in ct: mime = "image/webp"
             elif "gif" in ct: mime = "image/gif"
             
-            # 새로운 방식: Part 객체 사용
             image_part = types.Part.from_bytes(
                 data=image_data,
                 mime_type=mime
@@ -268,8 +329,7 @@ Korean: {text}
             return None
             
         except Exception as e:
-            print(f"      OCR 오류: {e}")
-            return None
+            raise e
     
     async def translate_single_text(self, text: str, target_language: TargetLanguage) -> str:
-        return self._translate_text(text, target_language, "텍스트")
+        return await self._translate_text_with_retry(text, target_language, "텍스트")
