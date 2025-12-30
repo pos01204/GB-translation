@@ -12,6 +12,7 @@ import { LoadingState } from '@/components/LoadingState'
 import { SideBySideView } from '@/components/SideBySideView'
 import { OptionTable } from '@/components/OptionTable'
 import { ImageOcrResults } from '@/components/ImageOcrResults'
+import { ImageGallery } from '@/components/ImageGallery'
 
 import { 
   scrapeProduct, 
@@ -216,11 +217,19 @@ export default function Home() {
 
           {/* 탭 네비게이션 */}
           <Tabs defaultValue="content" className="w-full">
-            <TabsList className="grid w-full grid-cols-3 max-w-md">
+            <TabsList className="grid w-full grid-cols-4 max-w-lg">
               <TabsTrigger value="content">상품 정보</TabsTrigger>
               <TabsTrigger value="options">옵션</TabsTrigger>
-              <TabsTrigger value="images">
-                이미지 OCR
+              <TabsTrigger value="gallery">
+                이미지
+                {originalData.detail_images.length > 0 && (
+                  <span className="ml-1 px-1.5 py-0.5 text-xs bg-muted-foreground/20 rounded">
+                    {originalData.detail_images.length}
+                  </span>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="ocr">
+                OCR
                 {translatedData.translated_image_texts.length > 0 && (
                   <span className="ml-1 px-1.5 py-0.5 text-xs bg-primary text-primary-foreground rounded">
                     {translatedData.translated_image_texts.length}
@@ -283,8 +292,16 @@ export default function Home() {
               )}
             </TabsContent>
 
+            {/* 이미지 갤러리 탭 */}
+            <TabsContent value="gallery" className="mt-6">
+              <ImageGallery 
+                images={originalData.detail_images}
+                productTitle={originalData.title}
+              />
+            </TabsContent>
+
             {/* 이미지 OCR 탭 */}
-            <TabsContent value="images" className="mt-6">
+            <TabsContent value="ocr" className="mt-6">
               {translatedData.translated_image_texts.length > 0 ? (
                 <ImageOcrResults
                   imageTexts={translatedData.translated_image_texts}

@@ -21,43 +21,31 @@ from .models import (
 class ProductTranslator:
     """Google Gemini를 사용한 상품 번역기"""
     
-    # 사용 가능한 Gemini 모델 목록 (우선순위 순)
-    AVAILABLE_MODELS = [
-        'gemini-2.5-flash-preview-05-20',  # Gemini 3 Flash (최신)
-        'gemini-2.0-flash',                 # Gemini 2.0 Flash (안정)
-        'gemini-1.5-flash',                 # Gemini 1.5 Flash (가장 안정)
-    ]
-    
     def __init__(self, api_key: Optional[str] = None):
         """
         Args:
             api_key: Google Gemini API 키
         """
         self.api_key = api_key
+        self.model = None
+        self.vision_model = None
+        
         if api_key:
-            genai.configure(api_key=api_key)
-            
-            # 최신 모델부터 시도하여 사용 가능한 모델 선택
-            self.model = None
-            self.vision_model = None
-            
-            for model_name in self.AVAILABLE_MODELS:
-                try:
-                    test_model = genai.GenerativeModel(model_name)
-                    # 모델 테스트 (간단한 요청)
-                    self.model = test_model
-                    self.vision_model = test_model
-                    print(f"✅ Gemini 모델 초기화 성공: {model_name}")
-                    break
-                except Exception as e:
-                    print(f"⚠️ 모델 {model_name} 사용 불가: {e}")
-                    continue
-            
-            if not self.model:
-                print("❌ 사용 가능한 Gemini 모델이 없습니다")
+            try:
+                genai.configure(api_key=api_key)
+                
+                # 안정적인 모델 사용 (gemini-1.5-flash가 가장 안정적)
+                model_name = 'gemini-1.5-flash'
+                self.model = genai.GenerativeModel(model_name)
+                self.vision_model = genai.GenerativeModel(model_name)
+                print(f"✅ Gemini 모델 초기화 성공: {model_name}")
+                
+            except Exception as e:
+                print(f"❌ Gemini 모델 초기화 실패: {e}")
+                self.model = None
+                self.vision_model = None
         else:
-            self.model = None
-            self.vision_model = None
+            print("⚠️ Gemini API 키가 설정되지 않았습니다")
         
     def _get_language_name(self, lang: TargetLanguage) -> str:
         """언어 코드를 언어명으로 변환"""
