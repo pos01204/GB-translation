@@ -130,6 +130,24 @@ class IdusScraper:
             await self.initialize()
             
         page = await self._create_stealth_page()
+
+        # lazy-load 이미지 누락을 줄이기 위해 네트워크로 로딩된 image 요청 URL도 수집
+        network_image_urls: list[str] = []
+
+        def _on_response(resp):
+            try:
+                req = resp.request
+                if getattr(req, "resource_type", None) == "image":
+                    u = resp.url
+                    if u and u.startswith("http"):
+                        network_image_urls.append(u)
+            except Exception:
+                pass
+
+        try:
+            page.on("response", _on_response)
+        except Exception:
+            pass
         
         try:
             # 페이지 로드
@@ -154,6 +172,13 @@ class IdusScraper:
             
             # 옵션 추출 (버튼 클릭 후)
             options = await self._extract_options(page)
+
+            # 옵션이 비면 인터랙티브 방식으로 재시도 (next_data 유무와 무관하게)
+            if not options:
+                try:
+                    options = await self._extract_options_interactive(page)
+                except Exception as e:
+                    print(f"⚠️ 인터랙티브 옵션 추출 실패: {e}")
             
             # 상세 이미지 URL 추출
             detail_images = await self._extract_detail_images(page)
@@ -184,6 +209,19 @@ class IdusScraper:
                         detail_images = list(dict.fromkeys(detail_images + (await self._extract_detail_images(page))))
                     except:
                         pass
+
+            # 네트워크/HTML 기반으로 이미지 후보 추가 수집 (하단 lazy-load 누락 완화)
+            try:
+                html_imgs = await self._extract_image_urls_from_html(page)
+            except Exception:
+                html_imgs = []
+
+            if network_image_urls:
+                # fragment 제거로 중복 완화
+                network_image_urls = [u.split("#")[0] for u in network_image_urls]
+
+            detail_images = list(dict.fromkeys(detail_images + html_imgs + network_image_urls))
+            detail_images = detail_images[:80]
             
             print(f"✅ 크롤링 완료: {title}")
             
@@ -200,6 +238,10 @@ class IdusScraper:
             
         finally:
             await page.close()
+            try:
+                page.remove_listener("response", _on_response)
+            except Exception:
+                pass
 
     def _pick_best_text(self, candidate: Any, fallback: str) -> str:
         """candidate가 유효한 텍스트면 선택, 아니면 fallback."""
@@ -408,6 +450,21 @@ class IdusScraper:
         """
         results: list[ProductOption] = []
 
+        # 0) Idus에서 자주 보이는 트리거: "옵션을 선택해주세요." 텍스트 영역을 먼저 클릭 시도
+        try:
+            hint = await page.query_selector('text="옵션을 선택해주세요."')
+            if hint:
+                clickable = await hint.evaluate_handle(
+                    """(el) => el.closest('button,[role="button"],[role="combobox"],div')"""
+                )
+                try:
+                    await clickable.click()
+                    await asyncio.sleep(0.6)
+                except:
+                    pass
+        except:
+            pass
+
         # 구매 영역 근처의 트리거를 최대한 포괄
         trigger_selectors = [
             '[aria-haspopup="listbox"]',
@@ -463,11 +520,22 @@ class IdusScraper:
                 await trig.click()
                 await asyncio.sleep(0.5)
 
-                # 옵션 항목 후보들 수집
-                option_els = []
-                for opt_sel in ['[role="option"]', '[class*="dropdown"] li', '[class*="menu"] li', 'li']:
+                # 옵션 항목 후보들 수집: dialog/bottom-sheet 내부로 범위를 좁혀 노이즈를 줄임
+                scope = None
+                for scope_sel in ['[role="dialog"]', '[class*="modal"]', '[class*="sheet"]', '[class*="bottom"]']:
                     try:
-                        option_els = await page.query_selector_all(opt_sel)
+                        el = await page.query_selector(scope_sel)
+                        if el:
+                            scope = el
+                            break
+                    except:
+                        continue
+
+                search_root = scope if scope else page
+                option_els = []
+                for opt_sel in ['[role="option"]', 'li[role="option"]', '[class*="dropdown"] li', 'li', 'button', '[class*="item"]']:
+                    try:
+                        option_els = await search_root.query_selector_all(opt_sel)
                         if option_els and len(option_els) >= 2:
                             break
                     except:
@@ -482,6 +550,8 @@ class IdusScraper:
                         # UI/푸터/버튼 텍스트 등 노이즈 제거
                         if t in ("선택", "선택하세요", "옵션 선택", "장바구니", "구매하기", "선물하기"):
                             continue
+                        if "옵션을 선택해주세요" in t:
+                            continue
                         if len(t) > 120:
                             continue
                         # 너무 많은 줄이 섞이면 첫 줄만
@@ -492,6 +562,41 @@ class IdusScraper:
                         continue
 
                 values = list(dict.fromkeys(values))
+
+                # 그룹명만 잡히고 실제 값이 안 잡히는 케이스(“쿠키 선택”만 나옴)를 위해:
+                # 그룹 후보를 눌러 한 번 더 값을 수집
+                if values and len(values) <= 3:
+                    group_like = [
+                        v for v in values
+                        if any(k in v for k in ["선택", "옵션"]) or re.match(r"^\d+\.", v)
+                    ]
+                    if group_like:
+                        try:
+                            group_el = await search_root.query_selector(f'text="{group_like[0]}"')
+                            if group_el:
+                                await group_el.click()
+                                await asyncio.sleep(0.5)
+                                option_els2 = await search_root.query_selector_all('[role="option"], li, button')
+                                values2: list[str] = []
+                                for opt2 in option_els2[:80]:
+                                    try:
+                                        tt = ((await opt2.inner_text()) or "").strip()
+                                        if not tt or len(tt) > 120:
+                                            continue
+                                        if tt in ("선택", "선택하세요", "옵션 선택", "장바구니", "구매하기", "선물하기"):
+                                            continue
+                                        if "옵션을 선택해주세요" in tt:
+                                            continue
+                                        if "\n" in tt:
+                                            tt = tt.split("\n")[0].strip()
+                                        values2.append(tt)
+                                    except:
+                                        continue
+                                values2 = list(dict.fromkeys(values2))
+                                if len(values2) > len(values):
+                                    values = values2
+                        except:
+                            pass
 
                 # 닫기 (ESC)
                 try:
@@ -540,9 +645,9 @@ class IdusScraper:
             except:
                 continue
 
-        # 2) 스크롤로 지연 로딩 유도
+        # 2) 스크롤로 지연 로딩 유도 (끝까지 적응형 스크롤)
         try:
-            await self._auto_scroll(page, max_steps=8, step_px=1200, pause_sec=0.4)
+            await self._auto_scroll_to_bottom(page, max_loops=30, pause_sec=0.35)
         except:
             pass
 
@@ -556,6 +661,51 @@ class IdusScraper:
             await page.evaluate("window.scrollBy(0, -400);")
         except:
             pass
+
+    async def _auto_scroll_to_bottom(self, page: Page, max_loops: int = 30, pause_sec: float = 0.35) -> None:
+        """
+        scrollHeight가 더 이상 늘지 않을 때까지 적응형으로 스크롤.
+        하단 이미지/상세가 viewport에 들어와야 로딩되는 구조를 최대한 커버.
+        """
+        stable = 0
+        last_h = 0
+        for _ in range(max_loops):
+            h = await page.evaluate("document.body.scrollHeight")
+            if h == last_h:
+                stable += 1
+            else:
+                stable = 0
+                last_h = h
+
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(pause_sec)
+
+            if stable >= 3:
+                break
+
+        # 상단으로 살짝 복귀
+        try:
+            await page.evaluate("window.scrollBy(0, -600);")
+        except:
+            pass
+
+    async def _extract_image_urls_from_html(self, page: Page) -> list[str]:
+        """page.content()에서 직접 이미지 URL을 정규식으로 추출 (DOM/네트워크 누락 폴백)."""
+        html = await page.content()
+        if not html:
+            return []
+        urls = re.findall(
+            r"https?://[^\\\"'\\s>]+\\.(?:jpg|jpeg|png|webp)(?:\\?[^\\\"'\\s>]*)?",
+            html,
+            flags=re.IGNORECASE,
+        )
+        urls = [
+            u for u in urls
+            if "icon" not in u.lower()
+            and "sprite" not in u.lower()
+            and not u.lower().endswith(".svg")
+        ]
+        return list(dict.fromkeys(urls))
     
     async def _extract_title(self, page: Page) -> str:
         """상품명 추출"""
@@ -837,7 +987,7 @@ class IdusScraper:
 
         # 상세 이미지는 스크롤해야 늦게 로딩되는 경우가 많음
         try:
-            await self._auto_scroll(page, max_steps=10, step_px=1400, pause_sec=0.35)
+            await self._auto_scroll_to_bottom(page, max_loops=30, pause_sec=0.3)
         except:
             pass
         
