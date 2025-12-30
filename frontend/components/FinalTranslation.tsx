@@ -6,17 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
-
-interface ImageText {
-  image_url: string
-  original_text: string
-  translated_text: string
-}
-
-interface ProductOption {
-  name: string
-  values: string[]
-}
+import type { ImageText, ProductOption } from '@/lib/api'
 
 interface FinalTranslationProps {
   translatedTitle: string
@@ -77,7 +67,7 @@ export function FinalTranslation({
 
       sortedTexts.forEach((item, index) => {
         sections.push(`[${targetLanguage === 'ja' ? '画像' : 'Image'} ${index + 1}]`)
-        sections.push(item.translated_text)
+        sections.push(item.translated_text || item.original_text || '')
         sections.push('')
       })
     }
