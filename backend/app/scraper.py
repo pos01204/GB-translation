@@ -1,12 +1,13 @@
 """
 아이디어스(Idus) 상품 크롤링 모듈
-모든 상세 이미지 수집 - 필터링 최소화
+HTML 전체에서 이미지 URL 추출 + 네트워크 캡처 + __NUXT__ 파싱
 """
 import asyncio
+import json
 import re
 import os
 from typing import Optional
-from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+from playwright.async_api import async_playwright, Browser, Page, BrowserContext, Response
 from playwright_stealth import stealth_async
 
 from .models import ProductData, ProductOption
@@ -90,23 +91,28 @@ class IdusScraper:
         # 네트워크에서 이미지 URL 수집
         network_images: set[str] = set()
         
-        def on_response(response):
+        def on_response(response: Response):
             try:
                 resp_url = response.url
-                # 이미지 응답 또는 Idus 이미지 CDN
-                if response.request.resource_type == "image":
-                    if resp_url.startswith('http'):
-                        network_images.add(resp_url)
-                elif 'image.idus.com' in resp_url and resp_url.startswith('http'):
+                # Idus 이미지 CDN URL 수집
+                if 'image.idus.com' in resp_url:
                     network_images.add(resp_url)
+                # 일반 이미지 리소스
+                elif response.request.resource_type == "image":
+                    if resp_url.startswith('http') and 'idus' in resp_url:
+                        network_images.add(resp_url)
             except:
                 pass
         
         page.on("response", on_response)
         
         try:
-            await page.goto(url, wait_until='networkidle', timeout=60000)
+            # 페이지 로드 (networkidle 대신 domcontentloaded + 대기)
+            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
             await asyncio.sleep(3)
+            
+            # HTML 전체 가져오기 (이미지 추출용)
+            html_content = await page.content()
             
             # 1. 기본 정보 추출
             title = await self._get_title(page)
@@ -115,25 +121,42 @@ class IdusScraper:
             description = await self._get_description(page)
             options = await self._get_options(page)
             
-            # 2. 이미지 수집 - 스크롤하면서 모든 이미지 로드
-            print("📜 페이지 스크롤 시작...")
-            await self._scroll_entire_page(page)
-            print("📜 페이지 스크롤 완료")
+            # 2. 전체 스크롤하여 lazy-load 이미지 로드
+            print("📜 이미지 로드를 위한 전체 스크롤...")
+            await self._full_scroll(page)
             
-            # 3. DOM에서 모든 이미지 URL 수집
-            dom_images = await self._collect_all_image_urls(page)
+            # 스크롤 후 HTML 다시 가져오기
+            html_content = await page.content()
             
-            # 4. 모든 이미지 합치기 (네트워크 + DOM)
-            all_images = list(network_images) + dom_images
+            # 3. HTML에서 모든 이미지 URL 추출 (정규식)
+            html_images = self._extract_images_from_html(html_content)
+            print(f"   HTML에서 추출: {len(html_images)}개")
             
-            # 5. 최소한의 필터링만 적용 (아이콘/로고만 제외)
-            filtered = self._minimal_filter(all_images)
+            # 4. __NUXT__ 스크립트에서 이미지 URL 추출
+            nuxt_images = self._extract_images_from_nuxt(html_content)
+            print(f"   __NUXT__에서 추출: {len(nuxt_images)}개")
+            
+            # 5. DOM에서 이미지 URL 추출
+            dom_images = await self._extract_images_from_dom(page)
+            print(f"   DOM에서 추출: {len(dom_images)}개")
+            
+            print(f"   네트워크에서 캡처: {len(network_images)}개")
+            
+            # 6. 모든 이미지 합치기
+            all_images = set()
+            all_images.update(html_images)
+            all_images.update(nuxt_images)
+            all_images.update(dom_images)
+            all_images.update(network_images)
+            
+            # 7. 필터링 및 정리
+            filtered_images = self._filter_images(list(all_images))
             
             print(f"✅ 크롤링 완료: {title}")
             print(f"   - 작가: {artist_name}")
             print(f"   - 가격: {price}")
             print(f"   - 옵션: {len(options)}개")
-            print(f"   - 이미지: {len(filtered)}개 (네트워크: {len(network_images)}, DOM: {len(dom_images)})")
+            print(f"   - 최종 이미지: {len(filtered_images)}개")
             
             return ProductData(
                 url=url,
@@ -142,7 +165,7 @@ class IdusScraper:
                 price=price,
                 description=description,
                 options=options,
-                detail_images=filtered,
+                detail_images=filtered_images,
                 image_texts=[]
             )
             
@@ -164,7 +187,7 @@ class IdusScraper:
             link = await page.query_selector('a[href*="/artist/"]')
             if link:
                 text = (await link.inner_text() or "").strip()
-                if 2 <= len(text) <= 50:
+                if 2 <= len(text) <= 50 and "바로가기" not in text:
                     return text
         except: pass
         return "작가명 없음"
@@ -186,7 +209,7 @@ class IdusScraper:
         return "가격 정보 없음"
 
     async def _get_description(self, page: Page) -> str:
-        # 탭 클릭 시도
+        # 작품정보 탭 클릭 시도
         try:
             for sel in ['text="작품정보"', 'text="상품정보"', 'text="상세정보"']:
                 tab = await page.query_selector(sel)
@@ -205,7 +228,6 @@ class IdusScraper:
                         document.querySelectorAll(sel).forEach(el => {
                             const t = el.innerText || '';
                             if (t.length > longest.length && t.length > 100) {
-                                // 노이즈 필터
                                 if (!t.includes('로그인') && !t.includes('장바구니')) {
                                     longest = t;
                                 }
@@ -224,7 +246,6 @@ class IdusScraper:
         options_dict: dict[str, set[str]] = {}
         
         try:
-            # 후기에서 옵션 추출
             texts = await page.evaluate("""
                 () => {
                     const result = [];
@@ -249,49 +270,94 @@ class IdusScraper:
         
         return [ProductOption(name=n, values=list(v)) for n, v in options_dict.items() if v]
 
-    async def _scroll_entire_page(self, page: Page):
-        """페이지 전체를 천천히 스크롤하여 모든 lazy-load 이미지 로드"""
+    async def _full_scroll(self, page: Page):
+        """페이지 전체를 천천히 스크롤"""
         try:
-            # 총 페이지 높이
             total = await page.evaluate("document.body.scrollHeight")
             current = 0
-            step = 300  # 300px씩 스크롤
+            step = 400
             
             while current < total:
                 await page.evaluate(f"window.scrollTo(0, {current})")
-                await asyncio.sleep(0.25)  # 이미지 로드 대기
+                await asyncio.sleep(0.3)
                 current += step
-                
-                # 동적 콘텐츠로 높이가 늘어났는지 확인
                 new_total = await page.evaluate("document.body.scrollHeight")
                 if new_total > total:
                     total = new_total
             
-            # 맨 아래에서 잠시 대기 (마지막 이미지 로드)
+            # 마지막에 맨 아래까지 확실히 스크롤
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await asyncio.sleep(1.5)
-            
-            # 맨 위로 돌아가기
-            await page.evaluate("window.scrollTo(0, 0)")
-            await asyncio.sleep(0.5)
             
         except Exception as e:
             print(f"스크롤 오류: {e}")
 
-    async def _collect_all_image_urls(self, page: Page) -> list[str]:
-        """DOM에서 모든 이미지 URL 수집"""
+    def _extract_images_from_html(self, html: str) -> set[str]:
+        """HTML 전체에서 정규식으로 이미지 URL 추출"""
+        images = set()
+        
+        # 1. image.idus.com 패턴 (가장 중요)
+        idus_pattern = r'https?://image\.idus\.com/image/files/[a-f0-9]+(?:_\d+)?\.(?:jpg|jpeg|png|webp|gif)'
+        for match in re.findall(idus_pattern, html, re.IGNORECASE):
+            images.add(match)
+        
+        # 2. 더 유연한 패턴 (확장자 없는 경우도 포함)
+        idus_pattern2 = r'https?://image\.idus\.com/image/files/[a-f0-9_]+(?:\.[a-z]{3,4})?'
+        for match in re.findall(idus_pattern2, html, re.IGNORECASE):
+            if len(match) > 40:  # 충분히 긴 URL만
+                images.add(match)
+        
+        # 3. cdn.idus.kr 패턴
+        cdn_pattern = r'https?://cdn\.idus\.kr[^"\'\s\)>]+\.(?:jpg|jpeg|png|webp|gif)'
+        for match in re.findall(cdn_pattern, html, re.IGNORECASE):
+            images.add(match)
+        
+        # 4. 일반 이미지 URL (idus 도메인만)
+        general_pattern = r'https?://[^"\'\s\)>]*idus[^"\'\s\)>]*\.(?:jpg|jpeg|png|webp|gif)'
+        for match in re.findall(general_pattern, html, re.IGNORECASE):
+            images.add(match)
+        
+        return images
+    
+    def _extract_images_from_nuxt(self, html: str) -> set[str]:
+        """__NUXT__ 스크립트에서 이미지 URL 추출"""
+        images = set()
+        
+        try:
+            # __NUXT__ 또는 __NUXT_DATA__ 패턴 찾기
+            patterns = [
+                r'<script[^>]*>\s*window\.__NUXT__\s*=\s*(\{.+?\})\s*;?\s*</script>',
+                r'<script[^>]*id="__NUXT_DATA__"[^>]*>(.+?)</script>',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, html, re.DOTALL)
+                if match:
+                    data_str = match.group(1)
+                    # 이미지 URL 추출 (JSON 파싱 없이 정규식으로)
+                    url_pattern = r'https?://image\.idus\.com/image/files/[^"\'\s\\]+(?:\.(?:jpg|jpeg|png|webp|gif))?'
+                    for url_match in re.findall(url_pattern, data_str, re.IGNORECASE):
+                        # 이스케이프 문자 제거
+                        clean_url = url_match.replace('\\/', '/').replace('\\"', '')
+                        if len(clean_url) > 40:
+                            images.add(clean_url)
+        except Exception as e:
+            print(f"NUXT 파싱 오류: {e}")
+        
+        return images
+
+    async def _extract_images_from_dom(self, page: Page) -> list[str]:
+        """DOM에서 이미지 URL 추출"""
         try:
             urls = await page.evaluate("""
                 () => {
-                    const urls = [];
+                    const urls = new Set();
                     
-                    // 1. img 태그
+                    // img 태그
                     document.querySelectorAll('img').forEach(img => {
-                        if (img.src && img.src.startsWith('http')) urls.push(img.src);
-                        
-                        // data-* 속성
-                        ['data-src', 'data-original', 'data-lazy-src', 'data-url'].forEach(attr => {
-                            const val = img.getAttribute(attr);
-                            if (val && val.startsWith('http')) urls.push(val);
+                        ['src', 'data-src', 'data-original', 'data-lazy-src'].forEach(attr => {
+                            const url = img.getAttribute(attr);
+                            if (url && url.includes('idus')) urls.add(url);
                         });
                         
                         // srcset
@@ -299,75 +365,72 @@ class IdusScraper:
                         if (srcset) {
                             srcset.split(',').forEach(part => {
                                 const url = part.trim().split(' ')[0];
-                                if (url && url.startsWith('http')) urls.push(url);
+                                if (url && url.includes('idus')) urls.add(url);
                             });
                         }
                     });
                     
-                    // 2. source 태그
+                    // source 태그
                     document.querySelectorAll('source').forEach(src => {
                         const srcset = src.getAttribute('srcset');
                         if (srcset) {
                             srcset.split(',').forEach(part => {
                                 const url = part.trim().split(' ')[0];
-                                if (url && url.startsWith('http')) urls.push(url);
+                                if (url && url.includes('idus')) urls.add(url);
                             });
                         }
                     });
                     
-                    // 3. background-image
+                    // background-image
                     document.querySelectorAll('*').forEach(el => {
                         try {
                             const bg = getComputedStyle(el).backgroundImage;
                             if (bg && bg !== 'none') {
                                 const match = bg.match(/url\\(['"]?(https?:\\/\\/[^'"\\)]+)['"]?\\)/);
-                                if (match) urls.push(match[1]);
+                                if (match && match[1].includes('idus')) {
+                                    urls.add(match[1]);
+                                }
                             }
                         } catch(e) {}
                     });
                     
-                    // 4. a 태그의 href (이미지 링크)
-                    document.querySelectorAll('a[href]').forEach(a => {
-                        const href = a.getAttribute('href');
-                        if (href && /\\.(jpg|jpeg|png|webp|gif)(\\?|$)/i.test(href)) {
-                            if (href.startsWith('http')) urls.push(href);
-                        }
-                    });
-                    
-                    return urls;
+                    return Array.from(urls);
                 }
             """)
             return urls or []
         except Exception as e:
-            print(f"이미지 수집 오류: {e}")
+            print(f"DOM 이미지 추출 오류: {e}")
             return []
 
-    def _minimal_filter(self, images: list[str]) -> list[str]:
-        """
-        최소한의 필터링 - 명백한 아이콘/로고만 제외
-        중복 제거는 정확한 URL 기준으로만
-        """
-        # 확실히 제외할 패턴만 (매우 보수적)
-        exclude = [
-            '/icon', '/sprite', '/logo', '/avatar', '/badge', '/emoji',
-            '/button', '/arrow', '/check/', '/close/', '/menu/', '/search/',
+    def _filter_images(self, images: list[str]) -> list[str]:
+        """이미지 필터링 - 최소한의 제외만 적용"""
+        
+        # 명확히 제외할 패턴만
+        exclude_patterns = [
+            '/icon', '/sprite', '/logo', '/avatar', '/badge',
+            '/emoji', '/button', '/arrow',
             'facebook.', 'twitter.', 'instagram.', 'kakao.', 'naver.',
-            'google.com', 'apple.com', 'play.google',
-            '/qr', '/escrow', '/membership',
-            'data:image',  # base64 인라인 이미지
+            'google.com', 'apple.com',
+            '/escrow', '/membership', '/banner-image',
+            'data:image'
         ]
         
         result = []
-        seen = set()  # 정확한 URL 중복 제거
+        seen_urls = set()
+        seen_file_ids = {}  # 같은 파일의 다른 크기 버전 처리
         
         for img in images:
-            if not img or not img.startswith('http'):
+            if not img or not isinstance(img, str):
+                continue
+            
+            # 절대 URL이 아니면 건너뛰기
+            if not img.startswith('http'):
                 continue
             
             # 정확한 URL 중복 체크
-            if img in seen:
+            if img in seen_urls:
                 continue
-            seen.add(img)
+            seen_urls.add(img)
             
             low = img.lower()
             
@@ -377,22 +440,57 @@ class IdusScraper:
             
             # 명백한 제외 패턴만 체크
             skip = False
-            for pattern in exclude:
+            for pattern in exclude_patterns:
                 if pattern in low:
                     skip = True
                     break
             if skip:
                 continue
             
-            # 이미지 확장자 또는 Idus CDN이면 포함
-            is_image = any(ext in low for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif'])
-            is_idus = 'idus.com' in low
-            
-            if is_image or is_idus:
+            # Idus 이미지 CDN URL인 경우
+            if 'image.idus.com' in low:
+                # 파일 ID 추출 (중복 크기 버전 처리)
+                match = re.search(r'files/([a-f0-9]+)', low)
+                if match:
+                    file_id = match.group(1)
+                    
+                    # 크기 정보 추출
+                    size_match = re.search(r'_(\d+)\.', low)
+                    size = int(size_match.group(1)) if size_match else 0
+                    
+                    # 같은 파일 ID가 있으면 더 큰 크기로 교체
+                    if file_id in seen_file_ids:
+                        if size > seen_file_ids[file_id]['size']:
+                            # 이전 URL 제거하고 새 URL 추가
+                            old_url = seen_file_ids[file_id]['url']
+                            if old_url in result:
+                                result.remove(old_url)
+                            seen_file_ids[file_id] = {'size': size, 'url': img}
+                            result.append(img)
+                    else:
+                        seen_file_ids[file_id] = {'size': size, 'url': img}
+                        result.append(img)
+                else:
+                    result.append(img)
+            else:
+                # Idus CDN이 아닌 다른 이미지
                 result.append(img)
         
-        print(f"📷 필터링: {len(images)}개 → {len(result)}개")
-        return result[:150]  # 최대 150개
+        # 상세 이미지 (텍스트가 있을 가능성이 높은) 우선 정렬
+        detail_keywords = ['detail', 'description', 'content', 'info', 'story']
+        prioritized = []
+        others = []
+        
+        for url in result:
+            if any(kw in url.lower() for kw in detail_keywords):
+                prioritized.append(url)
+            else:
+                others.append(url)
+        
+        final_result = prioritized + others
+        
+        print(f"📷 이미지 필터링: {len(images)}개 → {len(final_result)}개")
+        return final_result[:200]  # 최대 200개
 
 
 if __name__ == "__main__":
@@ -403,10 +501,15 @@ if __name__ == "__main__":
             result = await scraper.scrape_product(
                 "https://www.idus.com/v2/product/87beb859-49b2-4c18-86b4-f300b31d6247"
             )
-            print(f"\n제목: {result.title}")
-            print(f"이미지: {len(result.detail_images)}개")
+            print(f"\n===== 결과 =====")
+            print(f"제목: {result.title}")
+            print(f"작가: {result.artist_name}")
+            print(f"가격: {result.price}")
+            print(f"옵션: {result.options}")
+            print(f"이미지 수: {len(result.detail_images)}")
+            print(f"\n상위 10개 이미지:")
             for i, img in enumerate(result.detail_images[:10]):
-                print(f"  {i+1}. {img[:80]}...")
+                print(f"  {i+1}. {img}")
         finally:
             await scraper.close()
     
