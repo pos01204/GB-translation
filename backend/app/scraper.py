@@ -121,41 +121,58 @@ class IdusScraper:
             description = await self._get_description(page)
             options = await self._get_options(page)
             
-            # 2. 전체 스크롤하여 lazy-load 이미지 로드
+            # 2. "작품 정보 더보기" 버튼 클릭하여 상세 정보 펼치기
+            print("📌 작품 정보 더보기 버튼 클릭 시도...")
+            try:
+                expand_button = await page.query_selector('button:has-text("작품 정보 더보기")')
+                if expand_button:
+                    await expand_button.click()
+                    await asyncio.sleep(1)
+                    print("   ✅ 상세 정보 펼침")
+            except Exception as e:
+                print(f"   상세 정보 펼치기 실패 (무시): {e}")
+            
+            # 3. 전체 스크롤하여 lazy-load 이미지 로드
             print("📜 이미지 로드를 위한 전체 스크롤...")
             await self._full_scroll(page)
             
             # 스크롤 후 HTML 다시 가져오기
             html_content = await page.content()
             
-            # 3. HTML에서 모든 이미지 URL 추출 (정규식)
-            html_images = self._extract_images_from_html(html_content)
-            print(f"   HTML에서 추출: {len(html_images)}개")
+            # 4. 상세페이지 영역 내 이미지 추출 (위치 정보 포함, Y좌표 정렬)
+            print("📷 상세페이지 이미지 추출 중...")
+            detail_images_with_pos = await self._extract_images_with_position(page)
             
-            # 4. __NUXT__ 스크립트에서 이미지 URL 추출
-            nuxt_images = self._extract_images_from_nuxt(html_content)
-            print(f"   __NUXT__에서 추출: {len(nuxt_images)}개")
-            
-            # 5. DOM에서 이미지 URL 추출 (위치 정보 포함)
-            dom_images = await self._extract_images_from_dom(page)
-            dom_images_with_pos = await self._extract_images_with_position(page)
-            print(f"   DOM에서 추출: {len(dom_images)}개 (위치 정보: {len(dom_images_with_pos)}개)")
-            
-            print(f"   네트워크에서 캡처: {len(network_images)}개")
-            
-            # 6. 모든 이미지 합치기
-            all_images = set()
-            all_images.update(html_images)
-            all_images.update(nuxt_images)
-            all_images.update(dom_images)
-            all_images.update(network_images)
-            
-            # 7. 필터링 및 정리
-            filtered_images = self._filter_images(list(all_images))
-            
-            # 8. 위치 기반 정렬 적용 (DOM에서 추출한 순서 우선)
-            if dom_images_with_pos:
-                filtered_images = self._sort_images_by_position(filtered_images, dom_images_with_pos)
+            # 5. 위치 기반 이미지가 충분하면 해당 결과 사용
+            if len(detail_images_with_pos) >= 5:
+                # 상세페이지 영역 이미지만 사용 (이미 Y좌표로 정렬됨)
+                filtered_images = [img['url'] for img in detail_images_with_pos]
+                filtered_images = self._filter_images(filtered_images)
+                print(f"   ✅ 상세페이지 영역 이미지 사용: {len(filtered_images)}개")
+            else:
+                # 폴백: 전체 이미지에서 추출
+                print("   ⚠️ 상세페이지 이미지 부족, 전체 이미지에서 추출...")
+                
+                html_images = self._extract_images_from_html(html_content)
+                nuxt_images = self._extract_images_from_nuxt(html_content)
+                dom_images = await self._extract_images_from_dom(page)
+                
+                print(f"   HTML에서 추출: {len(html_images)}개")
+                print(f"   __NUXT__에서 추출: {len(nuxt_images)}개")
+                print(f"   DOM에서 추출: {len(dom_images)}개")
+                print(f"   네트워크에서 캡처: {len(network_images)}개")
+                
+                all_images = set()
+                all_images.update(html_images)
+                all_images.update(nuxt_images)
+                all_images.update(dom_images)
+                all_images.update(network_images)
+                
+                filtered_images = self._filter_images(list(all_images))
+                
+                # 위치 기반 정렬 적용
+                if detail_images_with_pos:
+                    filtered_images = self._sort_images_by_position(filtered_images, detail_images_with_pos)
             
             print(f"✅ 크롤링 완료: {title}")
             print(f"   - 작가: {artist_name}")
@@ -318,72 +335,133 @@ class IdusScraper:
         return "설명 없음"
 
     async def _get_options(self, page: Page) -> list[ProductOption]:
-        """옵션 추출 - 옵션 버튼 클릭하여 실제 옵션 추출"""
+        """옵션 추출 - "옵션을 선택해주세요" 버튼 클릭 방식 우선"""
         options: list[ProductOption] = []
         
         try:
-            # 방법 1: "옵션을 선택해주세요" 버튼 클릭하여 옵션 패널 열기
-            option_trigger = await page.query_selector('button:has-text("옵션을 선택해주세요")')
-            if not option_trigger:
-                option_trigger = await page.query_selector('button:has-text("옵션 선택")')
-            if not option_trigger:
-                option_trigger = await page.query_selector('[class*="option"] button')
+            # 방법 1: "옵션을 선택해주세요" 버튼 클릭하여 옵션 패널에서 추출 (가장 정확)
+            print("   📌 옵션 선택 버튼 클릭하여 옵션 추출 시도...")
+            
+            # 다양한 선택자로 옵션 선택 버튼/영역 찾기
+            option_selectors = [
+                'button:has-text("옵션을 선택해주세요")',
+                'button:has-text("옵션 선택")',
+                'div:has-text("옵션을 선택해주세요")',
+                '[class*="option-select"]',
+                '[class*="optionSelect"]',
+                '[class*="option"] button',
+                '[class*="select-option"]',
+            ]
+            
+            option_trigger = None
+            for selector in option_selectors:
+                try:
+                    option_trigger = await page.query_selector(selector)
+                    if option_trigger:
+                        # 클릭 가능한지 확인
+                        is_visible = await option_trigger.is_visible()
+                        if is_visible:
+                            print(f"      옵션 버튼 발견: {selector}")
+                            break
+                        else:
+                            option_trigger = None
+                except:
+                    continue
             
             if option_trigger:
-                print("   📌 옵션 버튼 클릭 시도...")
                 await option_trigger.click()
-                await asyncio.sleep(1)
+                await asyncio.sleep(1.5)  # 옵션 패널 로드 대기
                 
-                # 옵션 패널에서 옵션 그룹 찾기
-                option_data = await page.evaluate("""
+                # 옵션 패널에서 옵션 추출
+                panel_options = await page.evaluate("""
                     () => {
                         const result = [];
+                        const optionGroups = {};
                         
-                        // 바텀시트/다이얼로그에서 옵션 그룹 찾기
-                        const panels = document.querySelectorAll('[role="dialog"], [class*="sheet"], [class*="modal"], [class*="option"]');
+                        // 옵션 패널/바텀시트/드롭다운 찾기
+                        const panels = document.querySelectorAll(
+                            '[role="dialog"], [role="listbox"], [role="menu"], ' +
+                            '[class*="bottom-sheet"], [class*="bottomSheet"], ' +
+                            '[class*="option-panel"], [class*="optionPanel"], ' +
+                            '[class*="option-list"], [class*="optionList"], ' +
+                            '[class*="dropdown"], [class*="select-panel"], ' +
+                            '[class*="modal"], [class*="drawer"]'
+                        );
                         
                         for (const panel of panels) {
-                            // 옵션 그룹 헤더 찾기 (1. 쿠키 선택, 2. 수량 등)
-                            const groups = panel.querySelectorAll('[class*="group"], [class*="category"], h3, h4, [class*="title"]');
+                            const rect = panel.getBoundingClientRect();
+                            // 화면에 보이는 패널만 처리
+                            if (rect.width < 50 || rect.height < 50) continue;
                             
-                            // role="option" 또는 버튼 형태의 옵션 아이템 찾기
-                            const items = panel.querySelectorAll('[role="option"], [role="radio"], [class*="option-item"], li button, li[class*="item"]');
+                            const allText = panel.innerText || '';
+                            const lines = allText.split('\\n');
                             
-                            if (items.length > 0) {
-                                const values = [];
-                                items.forEach(item => {
-                                    // 첫 번째 줄만 추출 (가격 등 부가정보 제외)
-                                    let text = (item.innerText || '').trim().split('\\n')[0].trim();
+                            let currentGroup = null;
+                            
+                            for (const line of lines) {
+                                const trimmed = line.trim();
+                                if (!trimmed) continue;
+                                
+                                // "1. 쿠키 선택 (필수)" 또는 "쿠키 선택" 형식의 그룹 헤더
+                                const groupMatch = trimmed.match(/^(?:(\\d+)\\.\\s*)?(.+?)(?:\\s*\\(필수\\))?\\s*$/);
+                                if (groupMatch) {
+                                    const potentialGroup = groupMatch[2].trim();
+                                    // 그룹 이름으로 적합한지 확인
+                                    if (potentialGroup.includes('선택') && 
+                                        potentialGroup.length >= 2 && potentialGroup.length <= 30 &&
+                                        !potentialGroup.includes('원') && !potentialGroup.includes('구매')) {
+                                        currentGroup = potentialGroup;
+                                        if (!optionGroups[currentGroup]) {
+                                            optionGroups[currentGroup] = [];
+                                        }
+                                        continue;
+                                    }
+                                }
+                                
+                                // 옵션 값 수집
+                                if (currentGroup && trimmed.length >= 2 && trimmed.length <= 80) {
+                                    const noise = ['선택해주세요', '선택하세요', '확인', '취소', '닫기', 
+                                                  '장바구니', '구매하기', '필수', '총 상품금액', 
+                                                  '배송비', '수량', '품절', '옵션을'];
+                                    const isNoise = noise.some(n => trimmed.includes(n));
+                                    const isPriceOnly = /^[\\d,]+\\s*원?$/.test(trimmed);
+                                    const isNumber = /^\\d+$/.test(trimmed);
                                     
-                                    // 유효한 옵션값인지 확인
-                                    if (text && text.length >= 2 && text.length <= 50) {
-                                        // UI 텍스트/노이즈 제외
-                                        const noise = ['선택', '확인', '취소', '닫기', '장바구니', '구매', '원', '₩', '품절'];
-                                        let isNoise = noise.some(n => text.includes(n));
-                                        if (!isNoise) {
-                                            values.push(text);
+                                    if (!isNoise && !isPriceOnly && !isNumber && !/^\\d+\\.\\s*[가-힣]/.test(trimmed)) {
+                                        // 가격 정보 제거 (옵션값 뒤의 가격)
+                                        let cleanValue = trimmed.replace(/\\s*[\\(\\[]?[\\+\\-]?[\\d,]+\\s*원[\\)\\]]?\\s*$/g, '').trim();
+                                        if (cleanValue.length >= 2 && !optionGroups[currentGroup].includes(cleanValue)) {
+                                            optionGroups[currentGroup].push(cleanValue);
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // role="option" 요소에서도 추출
+                            const optionItems = panel.querySelectorAll('[role="option"], [class*="option-item"], [class*="optionItem"], li');
+                            if (optionItems.length > 0 && Object.keys(optionGroups).length === 0) {
+                                const values = [];
+                                optionItems.forEach(item => {
+                                    const text = (item.innerText || '').trim().split('\\n')[0].trim();
+                                    if (text && text.length >= 2 && text.length <= 60) {
+                                        const noise = ['선택해', '확인', '취소', '닫기', '품절'];
+                                        if (!noise.some(n => text.includes(n))) {
+                                            let cleanText = text.replace(/\\s*[\\(\\[]?[\\+\\-]?[\\d,]+\\s*원[\\)\\]]?\\s*$/g, '').trim();
+                                            if (cleanText.length >= 2) {
+                                                values.push(cleanText);
+                                            }
                                         }
                                     }
                                 });
-                                
                                 if (values.length > 0) {
-                                    // 옵션 그룹 이름 찾기
-                                    let groupName = '옵션';
-                                    for (const g of groups) {
-                                        const gText = (g.innerText || '').trim();
-                                        // "1. 쿠키 선택" 형식에서 이름 추출
-                                        const match = gText.match(/^\\d+\\.?\\s*(.+)/);
-                                        if (match) {
-                                            groupName = match[1].trim();
-                                            break;
-                                        } else if (gText.length >= 2 && gText.length <= 20) {
-                                            groupName = gText;
-                                            break;
-                                        }
-                                    }
-                                    
-                                    result.push({ name: groupName, values: values });
+                                    optionGroups['옵션'] = values;
                                 }
+                            }
+                        }
+                        
+                        for (const [name, values] of Object.entries(optionGroups)) {
+                            if (values.length > 0) {
+                                result.push({ name, values: [...new Set(values)] });
                             }
                         }
                         
@@ -391,49 +469,155 @@ class IdusScraper:
                     }
                 """)
                 
-                if option_data:
-                    for opt in option_data:
-                        if opt.get('values'):
-                            # 중복 제거
-                            unique_values = list(dict.fromkeys(opt['values']))
-                            options.append(ProductOption(name=opt['name'], values=unique_values))
+                if panel_options:
+                    for opt in panel_options:
+                        if opt.get('values') and len(opt['values']) > 0:
+                            options.append(ProductOption(name=opt['name'], values=opt['values']))
+                            print(f"      ✅ 옵션 패널에서 추출: {opt['name']}: {opt['values']}")
                 
                 # 패널 닫기
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(0.3)
             
-            # 방법 2: 옵션 버튼이 없는 경우, select 요소에서 추출
+            # 방법 2: 후기에서 옵션 정보 추출 (백업 - 후기가 있는 경우)
             if not options:
-                select_options = await page.evaluate("""
+                print("   📌 후기에서 옵션 정보 추출 시도...")
+                review_options = await page.evaluate("""
                     () => {
-                        const result = [];
-                        document.querySelectorAll('select').forEach(sel => {
-                            const name = sel.getAttribute('aria-label') || sel.getAttribute('name') || '옵션';
-                            const values = [];
-                            sel.querySelectorAll('option').forEach(opt => {
-                                const text = (opt.innerText || '').trim();
-                                if (text && text.length >= 2 && text.length <= 50 && 
-                                    !text.includes('선택') && !text.includes('옵션을')) {
-                                    values.push(text);
+                        const optionGroups = {};
+                        
+                        // 전체 페이지 텍스트에서 옵션 패턴 찾기
+                        const allText = document.body.innerText || '';
+                        
+                        // 패턴: "옵션명 선택: 옵션값"
+                        // 예: "쿠키 선택: 세인트릴리 쿠키 (파랑술)"
+                        const patterns = [
+                            /([가-힣a-zA-Z]+\\s*선택)\\s*[：:]\\s*([가-힣a-zA-Z0-9\\s\\(\\)\\[\\]]+?)(?=\\s*\\*|\\s*[,\\n]|$)/g,
+                            /구매작품\\s*[：:]\\s*([가-힣a-zA-Z]+\\s*선택)\\s*[：:]\\s*([가-힣a-zA-Z0-9\\s\\(\\)\\[\\]]+?)(?=\\s*\\*|\\s*[,\\n]|$)/g
+                        ];
+                        
+                        for (const pattern of patterns) {
+                            const matches = allText.matchAll(pattern);
+                            for (const match of matches) {
+                                let optName = match[1].trim();
+                                let optValue = match[2].trim().replace(/\\s+/g, ' ');
+                                
+                                if (optName && optValue &&
+                                    optName.length >= 2 && optName.length <= 30 && 
+                                    optValue.length >= 2 && optValue.length <= 80) {
+                                    
+                                    if (!optionGroups[optName]) {
+                                        optionGroups[optName] = new Set();
+                                    }
+                                    optionGroups[optName].add(optValue);
                                 }
-                            });
-                            if (values.length > 0) {
-                                result.push({ name, values });
                             }
-                        });
+                        }
+                        
+                        const result = [];
+                        for (const [name, values] of Object.entries(optionGroups)) {
+                            if (values.size > 0) {
+                                result.push({ name, values: Array.from(values) });
+                            }
+                        }
                         return result;
                     }
                 """)
                 
-                if select_options:
-                    for opt in select_options:
-                        if opt.get('values'):
+                if review_options:
+                    for opt in review_options:
+                        if opt.get('values') and len(opt['values']) > 0:
                             options.append(ProductOption(name=opt['name'], values=opt['values']))
+                            print(f"      ✅ 후기에서 추출: {opt['name']}: {opt['values']}")
+            
+            # 방법 3: 구매하기 버튼 클릭 후 바텀시트에서 추출
+            if not options:
+                print("   📌 구매하기 버튼 클릭하여 바텀시트에서 옵션 추출 시도...")
+                buy_button = await page.query_selector('button:has-text("구매하기")')
+                
+                if buy_button:
+                    await buy_button.click()
+                    await asyncio.sleep(2)
+                    
+                    sheet_options = await page.evaluate("""
+                        () => {
+                            const result = [];
+                            const optionGroups = {};
+                            
+                            // 바텀시트/모달 찾기
+                            const containers = document.querySelectorAll(
+                                '[role="dialog"], [class*="bottom-sheet"], [class*="bottomSheet"], ' +
+                                '[class*="modal"], [class*="drawer"], [class*="option-select"], ' +
+                                '[class*="optionSelect"], [class*="purchase"]'
+                            );
+                            
+                            for (const container of containers) {
+                                const allText = container.innerText || '';
+                                const lines = allText.split('\\n');
+                                
+                                let currentGroup = null;
+                                
+                                for (const line of lines) {
+                                    const trimmed = line.trim();
+                                    if (!trimmed) continue;
+                                    
+                                    // "1. 쿠키 선택 (필수)" 형식의 그룹 헤더
+                                    const groupMatch = trimmed.match(/^(\\d+)\\.?\\s*(.+?)(?:\\s*\\(필수\\))?\\s*$/);
+                                    if (groupMatch && !trimmed.includes('원') && trimmed.length <= 30) {
+                                        currentGroup = groupMatch[2].trim();
+                                        if (!optionGroups[currentGroup]) {
+                                            optionGroups[currentGroup] = [];
+                                        }
+                                        continue;
+                                    }
+                                    
+                                    // 옵션 값
+                                    if (currentGroup && trimmed.length >= 2 && trimmed.length <= 60) {
+                                        const noise = ['선택해주세요', '선택하세요', '확인', '취소', '닫기', 
+                                                      '장바구니', '구매하기', '필수', '총 상품금액', 
+                                                      '배송비', '수량', '품절'];
+                                        const isNoise = noise.some(n => trimmed.includes(n));
+                                        const isPriceOnly = /^[\\d,]+\\s*원?$/.test(trimmed);
+                                        const isNumber = /^\\d+$/.test(trimmed);
+                                        
+                                        if (!isNoise && !isPriceOnly && !isNumber && !/^\\d+\\./.test(trimmed)) {
+                                            let cleanValue = trimmed.replace(/\\s*[\\(\\[]?[\\+\\-]?[\\d,]+\\s*원[\\)\\]]?\\s*$/g, '').trim();
+                                            if (cleanValue.length >= 2 && !optionGroups[currentGroup].includes(cleanValue)) {
+                                                optionGroups[currentGroup].push(cleanValue);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            for (const [name, values] of Object.entries(optionGroups)) {
+                                if (values.length > 0) {
+                                    result.push({ name, values: [...new Set(values)] });
+                                }
+                            }
+                            
+                            return result;
+                        }
+                    """)
+                    
+                    if sheet_options:
+                        for opt in sheet_options:
+                            if opt.get('values') and len(opt['values']) > 0:
+                                options.append(ProductOption(name=opt['name'], values=opt['values']))
+                                print(f"      ✅ 바텀시트에서 추출: {opt['name']}: {opt['values']}")
+                    
+                    # 바텀시트 닫기
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.5)
             
             print(f"   📌 옵션 추출 완료: {len(options)}개 그룹")
+            for opt in options:
+                print(f"      - {opt.name}: {opt.values}")
             
         except Exception as e:
             print(f"옵션 추출 오류: {e}")
+            import traceback
+            traceback.print_exc()
         
         return options
 
@@ -570,7 +754,7 @@ class IdusScraper:
             return []
 
     async def _extract_images_with_position(self, page: Page) -> list[dict]:
-        """DOM에서 이미지 URL과 Y좌표 추출 (페이지 순서 보장)"""
+        """상세페이지(작품정보 탭) 영역 내 이미지만 추출 (Y좌표 순서 보장)"""
         try:
             images = await page.evaluate("""
                 () => {
@@ -578,55 +762,202 @@ class IdusScraper:
                     const seen = new Set();
                     const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
                     
-                    // 모든 img 요소 수집
+                    // ===== 1단계: 탭 구조 분석 =====
+                    // 아이디어스는 "작품정보", "후기", "댓글", "추천" 탭 구조
+                    let tabHeaderY = null;  // 탭 헤더(버튼들)의 Y 위치
+                    let reviewTabY = null;  // "후기" 탭 콘텐츠 시작 Y
+                    let detailAreaMinY = 0;
+                    let detailAreaMaxY = Infinity;
+                    
+                    // 탭 버튼들 찾기 (tablist)
+                    const tabLists = document.querySelectorAll('[role="tablist"], [class*="tab-list"], [class*="tabList"]');
+                    for (const tabList of tabLists) {
+                        const tabs = tabList.querySelectorAll('[role="tab"], button, a');
+                        let hasProductInfoTab = false;
+                        let hasReviewTab = false;
+                        
+                        tabs.forEach(tab => {
+                            const text = (tab.innerText || tab.textContent || '').trim();
+                            if (text.includes('작품정보') || text.includes('상품정보') || text.includes('상세')) {
+                                hasProductInfoTab = true;
+                            }
+                            if (text.includes('후기') || text.includes('리뷰')) {
+                                hasReviewTab = true;
+                            }
+                        });
+                        
+                        // 작품정보와 후기 탭이 있는 탭리스트 발견
+                        if (hasProductInfoTab && hasReviewTab) {
+                            const rect = tabList.getBoundingClientRect();
+                            tabHeaderY = rect.bottom + scrollTop;  // 탭 헤더 아래부터가 콘텐츠 영역
+                            console.log('탭 헤더 발견, Y:', tabHeaderY);
+                            break;
+                        }
+                    }
+                    
+                    // ===== 2단계: 상세페이지 영역 범위 결정 =====
+                    // "작품 정보 더보기" 버튼 또는 그 주변 영역 찾기
+                    const moreInfoBtn = document.querySelector('button:has-text("작품 정보 더보기"), [class*="more-info"], [class*="moreInfo"]');
+                    if (moreInfoBtn) {
+                        const rect = moreInfoBtn.getBoundingClientRect();
+                        // 더보기 버튼 위쪽이 상세 이미지 영역
+                        detailAreaMaxY = rect.top + scrollTop + 100; // 약간의 여유
+                        console.log('더보기 버튼 발견, MaxY:', detailAreaMaxY);
+                    }
+                    
+                    // 후기/댓글/추천 영역 찾기 (상세페이지 영역 끝)
+                    const sectionSelectors = [
+                        '[class*="review-section"]', '[class*="reviewSection"]',
+                        '[class*="comment-section"]', '[class*="commentSection"]',
+                        '[class*="recommend"]', '[class*="related"]', '[class*="similar"]'
+                    ];
+                    
+                    for (const sel of sectionSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            const rect = el.getBoundingClientRect();
+                            const sectionY = rect.top + scrollTop;
+                            if (sectionY > (tabHeaderY || 0) && sectionY < detailAreaMaxY) {
+                                detailAreaMaxY = sectionY;
+                                console.log('섹션 발견:', sel, 'MaxY:', detailAreaMaxY);
+                            }
+                        }
+                    }
+                    
+                    // 탭 헤더가 있으면 그 아래부터 시작
+                    if (tabHeaderY) {
+                        detailAreaMinY = tabHeaderY;
+                    } else {
+                        // 탭을 찾지 못한 경우, 상단 영역(헤더, 메인이미지) 제외
+                        const viewportHeight = window.innerHeight;
+                        detailAreaMinY = viewportHeight * 0.4;
+                    }
+                    
+                    console.log('상세페이지 영역 범위:', detailAreaMinY, '-', detailAreaMaxY);
+                    
+                    // ===== 3단계: 명확한 제외 영역 =====
+                    const excludeSelectors = [
+                        // 헤더/네비게이션
+                        'header', 'nav', '[class*="header"]', '[class*="nav"]',
+                        // 푸터
+                        'footer', '[class*="footer"]',
+                        // 후기/리뷰 영역 (이미지 포함됨)
+                        '[class*="review"]', '[class*="후기"]',
+                        // 댓글 영역
+                        '[class*="comment"]', '[class*="댓글"]',
+                        // 추천/관련 상품
+                        '[class*="recommend"]', '[class*="related"]', '[class*="similar"]', '[class*="추천"]',
+                        // 배너/팝업
+                        '[class*="banner"]', '[class*="popup"]', '[class*="modal"]',
+                        // 작가/샵 정보
+                        '[class*="artist"]', '[class*="shop"]', '[class*="seller"]',
+                        // 구매 정보
+                        '[class*="purchase"]', '[class*="buy"]', '[class*="cart"]'
+                    ];
+                    
+                    const excludeRects = [];
+                    for (const sel of excludeSelectors) {
+                        document.querySelectorAll(sel).forEach(el => {
+                            const rect = el.getBoundingClientRect();
+                            // 크기가 충분한 영역만 제외 대상으로
+                            if (rect.height > 50) {
+                                excludeRects.push({
+                                    top: rect.top + scrollTop,
+                                    bottom: rect.bottom + scrollTop
+                                });
+                            }
+                        });
+                    }
+                    
+                    // ===== 4단계: 이미지 수집 =====
                     document.querySelectorAll('img').forEach((img, domIndex) => {
-                        // URL 추출 (여러 속성에서)
+                        // URL 추출
                         const url = img.src || img.getAttribute('data-src') || 
                                    img.getAttribute('data-original') || img.getAttribute('data-lazy-src');
                         
                         if (!url || !url.includes('idus') || seen.has(url)) return;
-                        seen.add(url);
                         
-                        // 위치 정보
+                        // 이미지 크기 및 위치
                         const rect = img.getBoundingClientRect();
+                        const imgY = rect.top + scrollTop;
+                        const imgX = rect.left;
+                        
+                        // 너무 작은 이미지 제외 (아이콘, 썸네일 등)
+                        if (rect.width < 150 || rect.height < 150) return;
+                        
+                        // 상세페이지 영역 범위 체크
+                        if (imgY < detailAreaMinY - 50 || imgY > detailAreaMaxY + 50) return;
+                        
+                        // 제외 영역 체크
+                        let inExcluded = false;
+                        for (const exRect of excludeRects) {
+                            // 이미지의 중심이 제외 영역 안에 있는지 확인
+                            const imgCenterY = imgY + rect.height / 2;
+                            if (imgCenterY >= exRect.top && imgCenterY <= exRect.bottom) {
+                                inExcluded = true;
+                                break;
+                            }
+                        }
+                        if (inExcluded) return;
+                        
+                        // URL 파일 경로로 제외 (프로필, 아이콘 등)
+                        const urlLower = url.toLowerCase();
+                        if (urlLower.includes('/profile') || urlLower.includes('/avatar') ||
+                            urlLower.includes('/icon') || urlLower.includes('/badge') ||
+                            urlLower.includes('/review') || urlLower.includes('/thumb_') ||
+                            urlLower.includes('_50.') || urlLower.includes('_100.') ||
+                            urlLower.includes('_150.') || urlLower.includes('_200.')) {
+                            return;
+                        }
+                        
+                        seen.add(url);
                         
                         images.push({
                             url: url,
-                            y_position: rect.top + scrollTop,  // 절대 Y좌표
-                            x_position: rect.left,
+                            y_position: imgY,
+                            x_position: imgX,
                             width: rect.width,
                             height: rect.height,
                             dom_index: domIndex
                         });
                     });
                     
-                    // Y좌표로 정렬 (같은 Y면 X좌표로)
+                    // Y좌표로 정렬 (같은 Y면 X로 정렬)
                     return images.sort((a, b) => {
-                        // 10px 이내 차이는 같은 행으로 간주
-                        if (Math.abs(a.y_position - b.y_position) < 10) {
+                        if (Math.abs(a.y_position - b.y_position) < 20) {
                             return a.x_position - b.x_position;
                         }
                         return a.y_position - b.y_position;
                     });
                 }
             """)
+            
+            print(f"   📷 상세페이지 영역 이미지: {len(images)}개")
+            if images:
+                print(f"      Y 범위: {images[0].get('y_position', 0):.0f} ~ {images[-1].get('y_position', 0):.0f}")
             return images or []
         except Exception as e:
             print(f"위치 기반 이미지 추출 오류: {e}")
             return []
 
     def _filter_images(self, images: list[str]) -> list[str]:
-        """이미지 필터링 - 최소한의 제외만 적용"""
+        """이미지 필터링 - 상세페이지 이미지만 유지"""
         
-        # 명확히 제외할 패턴만
+        # 명확히 제외할 패턴
         exclude_patterns = [
             '/icon', '/sprite', '/logo', '/avatar', '/badge',
-            '/emoji', '/button', '/arrow',
+            '/emoji', '/button', '/arrow', '/profile',
             'facebook.', 'twitter.', 'instagram.', 'kakao.', 'naver.',
             'google.com', 'apple.com',
-            '/escrow', '/membership', '/banner-image',
+            '/escrow', '/membership', '/banner',
+            '/thumbnail', '/thumb_', '_thumb',  # 썸네일 제외
+            '/review/', '/comment/',  # 후기 이미지 제외
+            '/artist/', '/shop/',  # 작가/샵 이미지 제외
             'data:image'
         ]
+        
+        # 크기 기반 제외 패턴 (작은 이미지)
+        small_size_patterns = ['_50.', '_100.', '_150.', '_200.', '_250.']
         
         result = []
         seen_urls = set()
@@ -651,7 +982,12 @@ class IdusScraper:
             if '.svg' in low:
                 continue
             
-            # 명백한 제외 패턴만 체크
+            # 작은 크기 이미지 제외
+            is_small = any(p in low for p in small_size_patterns)
+            if is_small:
+                continue
+            
+            # 명백한 제외 패턴 체크
             skip = False
             for pattern in exclude_patterns:
                 if pattern in low:
@@ -669,7 +1005,11 @@ class IdusScraper:
                     
                     # 크기 정보 추출
                     size_match = re.search(r'_(\d+)\.', low)
-                    size = int(size_match.group(1)) if size_match else 0
+                    size = int(size_match.group(1)) if size_match else 9999  # 크기 없으면 원본
+                    
+                    # 최소 크기 필터 (300px 이상만)
+                    if size_match and size < 300:
+                        continue
                     
                     # 같은 파일 ID가 있으면 더 큰 크기로 교체
                     if file_id in seen_file_ids:
@@ -686,11 +1026,11 @@ class IdusScraper:
                 else:
                     result.append(img)
             else:
-                # Idus CDN이 아닌 다른 이미지
-                result.append(img)
+                # Idus CDN이 아닌 다른 이미지는 제외 (상세페이지에는 idus 이미지만 있음)
+                pass
         
         print(f"📷 이미지 필터링: {len(images)}개 → {len(result)}개")
-        return result[:200]  # 최대 200개
+        return result[:100]  # 최대 100개 (상세페이지 이미지만)
     
     def _sort_images_by_position(self, images: list[str], position_data: list[dict]) -> list[str]:
         """위치 정보를 기반으로 이미지 정렬 (페이지 순서 보장)"""

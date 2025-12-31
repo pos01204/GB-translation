@@ -2,7 +2,7 @@
 chcp 65001 > nul
 echo ========================================
 echo    Idus Translator Deploy Script
-echo    Phase 4: Fix TypeScript Error
+echo    Fix: Option Button Click Priority
 echo ========================================
 echo.
 
@@ -17,7 +17,7 @@ git add -A
 
 echo.
 echo [3/4] Creating commit...
-git commit -m "Fix: GlossaryManager TypeScript category type error"
+git commit -m "Fix: Option extraction - click option button first, review fallback"
 
 echo.
 echo [4/4] Pushing to remote...
@@ -30,5 +30,16 @@ echo ========================================
 echo.
 echo Frontend (Vercel): https://gb-translation.vercel.app
 echo Backend (Railway): Auto-deploy triggered
+echo.
+echo Option Extraction Priority:
+echo   1. Click "option select" button (most accurate)
+echo   2. Extract from reviews (fallback)
+echo   3. Click "buy" button bottom sheet (fallback)
+echo.
+echo Image Area Filtering:
+echo   - Tab structure based detection
+echo   - Product info tab content only
+echo   - Y-coordinate based sorting
+echo   - Minimum size filter (150px)
 echo.
 pause
