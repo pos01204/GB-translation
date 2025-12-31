@@ -2,7 +2,7 @@
 chcp 65001 > nul
 echo ========================================
 echo    Idus Translator Deploy Script
-echo    Phase 3: Advanced Features Complete
+echo    Phase 4: Batch Processing + Glossary
 echo ========================================
 echo.
 
@@ -17,7 +17,7 @@ git add -A
 
 echo.
 echo [3/4] Creating commit...
-git commit -m "Phase 3: Add translation history, quality check, and glossary features"
+git commit -m "Phase 4: Add batch processing and glossary management features"
 
 echo.
 echo [4/4] Pushing to remote...
@@ -30,5 +30,10 @@ echo ========================================
 echo.
 echo Frontend (Vercel): https://gb-translation.vercel.app
 echo Backend (Railway): Auto-deploy triggered
+echo.
+echo New Features:
+echo   - Batch translation (up to 10 URLs)
+echo   - Glossary management UI
+echo   - JSON import/export
 echo.
 pause

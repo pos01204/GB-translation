@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { RefreshCw, Download, AlertCircle, Copy, ClipboardCopy, FileText, ChevronDown } from 'lucide-react'
+import { RefreshCw, Download, AlertCircle, Copy, ClipboardCopy, FileText, ChevronDown, Package } from 'lucide-react'
+import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -273,6 +274,21 @@ export default function Home() {
             isLoading={false}
             disabled={false}
           />
+          
+          {/* 추가 기능 링크 */}
+          <div className="mt-4 flex justify-center gap-3">
+            <Link href="/batch">
+              <Button variant="outline" className="gap-2">
+                <Package className="w-4 h-4" />
+                배치 번역
+              </Button>
+            </Link>
+            <Link href="/glossary">
+              <Button variant="ghost" className="gap-2">
+                📚 용어집
+              </Button>
+            </Link>
+          </div>
           
           {/* 에러 메시지 */}
           {status === 'error' && error && (

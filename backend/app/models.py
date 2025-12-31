@@ -105,3 +105,41 @@ class HealthResponse(BaseModel):
     status: str
     version: str
 
+
+# ============ 배치 처리 모델 ============
+
+class BatchTranslateRequest(BaseModel):
+    """배치 번역 요청 모델"""
+    urls: list[str]  # 번역할 URL 목록
+    target_language: TargetLanguage
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "urls": [
+                    "https://www.idus.com/v2/product/12345678",
+                    "https://www.idus.com/v2/product/87654321"
+                ],
+                "target_language": "en"
+            }
+        }
+
+
+class BatchItemResult(BaseModel):
+    """배치 처리 개별 결과"""
+    url: str
+    success: bool
+    message: str
+    data: Optional[TranslatedProduct] = None
+    original_data: Optional[ProductData] = None
+
+
+class BatchTranslateResponse(BaseModel):
+    """배치 번역 응답 모델"""
+    success: bool
+    message: str
+    total_count: int
+    success_count: int
+    failed_count: int
+    results: list[BatchItemResult]
+

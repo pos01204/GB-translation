@@ -203,6 +203,60 @@ export async function scrapeAndTranslate(
   return data
 }
 
+// ============ 배치 처리 API ============
+
+export interface BatchItemResult {
+  url: string
+  success: boolean
+  message: string
+  data: TranslatedProduct | null
+  original_data: ProductData | null
+}
+
+export interface BatchTranslateResponse {
+  success: boolean
+  message: string
+  total_count: number
+  success_count: number
+  failed_count: number
+  results: BatchItemResult[]
+}
+
+/**
+ * 배치 번역 요청
+ */
+export async function batchTranslate(
+  urls: string[],
+  targetLanguage: TargetLanguage
+): Promise<BatchTranslateResponse> {
+  console.log('📦 Batch translate request:', `${API_BASE_URL}/api/batch-translate`)
+  console.log(`   URLs: ${urls.length}개`)
+  
+  const response = await fetch(`${API_BASE_URL}/api/batch-translate`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      urls,
+      target_language: targetLanguage,
+    }),
+  })
+
+  console.log('📥 Batch response status:', response.status)
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    console.error('❌ Batch error:', error)
+    throw new Error(error.detail || error.message || `배치 처리 요청에 실패했습니다. (${response.status})`)
+  }
+
+  const data = await response.json()
+  console.log('✅ Batch success:', data.success, data.message)
+  return data
+}
+
 // ============ Utility Functions ============
 
 /**

@@ -15,6 +15,10 @@ from .models import (
     TranslateRequest,
     TranslateResponse,
     HealthResponse,
+    BatchTranslateRequest,
+    BatchTranslateResponse,
+    BatchItemResult,
+    TargetLanguage,
 )
 from .scraper import IdusScraper
 from .translator import ProductTranslator
@@ -333,7 +337,6 @@ async def scrape_and_translate(url: str, target_language: str = "en"):
         print(f"✅ 크롤링 완료: {product_data.title}")
         
         # 2. 번역
-        from .models import TargetLanguage
         lang = TargetLanguage.ENGLISH if target_language == "en" else TargetLanguage.JAPANESE
         
         print(f"🌐 번역 시작: {lang.value}")
@@ -358,6 +361,135 @@ async def scrape_and_translate(url: str, target_language: str = "en"):
             message=f"처리 중 오류 발생: {str(e)}",
             data=None
         )
+
+
+# ============ 배치 처리 API ============
+
+@app.options("/api/batch-translate")
+async def batch_translate_options():
+    """CORS preflight 요청 처리"""
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+
+@app.post("/api/batch-translate", response_model=BatchTranslateResponse, tags=["Batch"])
+async def batch_translate(request: BatchTranslateRequest):
+    """
+    여러 URL을 한 번에 크롤링 및 번역
+    
+    - **urls**: 아이디어스 상품 URL 목록 (최대 10개)
+    - **target_language**: 번역 대상 언어 (en/ja)
+    
+    각 URL을 순차적으로 처리하며, 개별 결과를 반환합니다.
+    """
+    global scraper, translator
+    
+    # 지연 초기화
+    await initialize_services()
+    
+    if not scraper:
+        return BatchTranslateResponse(
+            success=False,
+            message="스크래퍼가 초기화되지 않았습니다.",
+            total_count=len(request.urls),
+            success_count=0,
+            failed_count=len(request.urls),
+            results=[]
+        )
+    
+    if not translator:
+        return BatchTranslateResponse(
+            success=False,
+            message="번역기가 초기화되지 않았습니다.",
+            total_count=len(request.urls),
+            success_count=0,
+            failed_count=len(request.urls),
+            results=[]
+        )
+    
+    # URL 개수 제한
+    MAX_BATCH_SIZE = 10
+    urls = request.urls[:MAX_BATCH_SIZE]
+    
+    results: list[BatchItemResult] = []
+    success_count = 0
+    failed_count = 0
+    
+    print(f"\n{'='*60}")
+    print(f"📦 배치 처리 시작: {len(urls)}개 URL")
+    print(f"🌐 대상 언어: {request.target_language.value}")
+    print(f"{'='*60}\n")
+    
+    for idx, url in enumerate(urls):
+        print(f"\n[{idx + 1}/{len(urls)}] 처리 중: {url[:50]}...")
+        
+        # URL 유효성 검사
+        if "idus.com" not in url:
+            print(f"   ❌ 유효하지 않은 URL")
+            results.append(BatchItemResult(
+                url=url,
+                success=False,
+                message="유효한 아이디어스 URL이 아닙니다.",
+                data=None,
+                original_data=None
+            ))
+            failed_count += 1
+            continue
+        
+        try:
+            # 1. 크롤링
+            print(f"   📥 크롤링...")
+            product_data = await scraper.scrape_product(url)
+            print(f"   ✅ 크롤링 완료: {product_data.title[:30]}...")
+            
+            # 2. 번역
+            print(f"   🌐 번역...")
+            translated_data = await translator.translate_product(
+                product_data=product_data,
+                target_language=request.target_language
+            )
+            print(f"   ✅ 번역 완료")
+            
+            results.append(BatchItemResult(
+                url=url,
+                success=True,
+                message="처리 완료",
+                data=translated_data,
+                original_data=product_data
+            ))
+            success_count += 1
+            
+        except Exception as e:
+            print(f"   ❌ 오류: {str(e)}")
+            results.append(BatchItemResult(
+                url=url,
+                success=False,
+                message=f"처리 중 오류: {str(e)}",
+                data=None,
+                original_data=None
+            ))
+            failed_count += 1
+    
+    print(f"\n{'='*60}")
+    print(f"📦 배치 처리 완료")
+    print(f"   ✅ 성공: {success_count}개")
+    print(f"   ❌ 실패: {failed_count}개")
+    print(f"{'='*60}\n")
+    
+    return BatchTranslateResponse(
+        success=success_count > 0,
+        message=f"배치 처리 완료: {success_count}개 성공, {failed_count}개 실패",
+        total_count=len(urls),
+        success_count=success_count,
+        failed_count=failed_count,
+        results=results
+    )
 
 
 # 개발용 실행
