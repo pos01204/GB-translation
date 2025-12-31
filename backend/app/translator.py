@@ -59,14 +59,18 @@ class ProductTranslator:
             
             self.client = genai.Client(api_key=api_key)
             
-            # 모델 우선순위 (높은 quota 모델 우선)
+            # 모델 우선순위 (최신 모델 우선)
             model_candidates = [
-                "gemini-2.5-flash-preview-05-20",  # 권장: 높은 quota
+                "gemini-2.5-flash-preview-05-20",  # 최신 권장
+                "gemini-2.5-flash",
                 "gemini-2.0-flash",
                 "gemini-2.0-flash-exp", 
                 "gemini-1.5-flash",
                 "gemini-1.5-pro",
+                "gemini-pro",
             ]
+            
+            api_key_leaked = False
             
             for model_name in model_candidates:
                 try:
@@ -85,13 +89,26 @@ class ProductTranslator:
                         
                 except Exception as e:
                     error_str = str(e)
-                    if "404" in error_str or "not found" in error_str.lower():
+                    if "leaked" in error_str.lower() or "PERMISSION_DENIED" in error_str:
+                        print(f"   ⛔ API 키 차단됨! 새 API 키가 필요합니다.")
+                        api_key_leaked = True
+                        break  # 더 이상 시도하지 않음
+                    elif "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                        print(f"   ⚠️ {model_name}: Quota 초과 - 다음 모델 시도")
+                    elif "404" in error_str or "not found" in error_str.lower():
                         print(f"   ⚠️ {model_name}: 사용 불가")
                     else:
-                        print(f"   ⚠️ {model_name}: {e}")
+                        print(f"   ⚠️ {model_name}: {str(e)[:100]}")
                     continue
             
-            print("❌ 사용 가능한 모델을 찾을 수 없습니다")
+            if api_key_leaked:
+                print("="*60)
+                print("⛔ API 키가 유출로 보고되어 차단되었습니다!")
+                print("   새 API 키를 생성하세요: https://aistudio.google.com/apikey")
+                print("   Railway 환경 변수 GEMINI_API_KEY를 업데이트하세요.")
+                print("="*60)
+            else:
+                print("❌ 사용 가능한 모델을 찾을 수 없습니다")
             
         except Exception as e:
             print(f"❌ Gemini 초기화 실패: {e}")
