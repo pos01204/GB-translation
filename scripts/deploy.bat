@@ -1,21 +1,34 @@
 @echo off
 chcp 65001 > nul
-cd /d "%~dp0\.."
-
-echo === Git Deploy ===
+echo ========================================
+echo    Idus Translator Deploy Script
+echo    Phase 3: Advanced Features Complete
+echo ========================================
 echo.
-echo Adding files...
+
+cd /d "%~dp0.."
+
+echo [1/4] Checking Git status...
+git status
+
+echo.
+echo [2/4] Adding all changes...
 git add -A
 
 echo.
-echo Committing...
-git commit -m "fix: add missing Label component for ImageOcrMapping"
+echo [3/4] Creating commit...
+git commit -m "Phase 3: Add translation history, quality check, and glossary features"
 
 echo.
-echo Pushing to origin...
+echo [4/4] Pushing to remote...
 git push origin main
 
 echo.
-echo === Deploy Complete ===
+echo ========================================
+echo    Deploy completed!
+echo ========================================
+echo.
+echo Frontend (Vercel): https://gb-translation.vercel.app
+echo Backend (Railway): Auto-deploy triggered
+echo.
 pause
-

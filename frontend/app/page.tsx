@@ -21,6 +21,8 @@ import { OptionTable } from '@/components/OptionTable'
 import { ImageOcrResults } from '@/components/ImageOcrResults'
 import { ImageGallery } from '@/components/ImageGallery'
 import { ImageOcrMapping } from '@/components/ImageOcrMapping'
+import { TranslationHistory } from '@/components/TranslationHistory'
+import { QualityCheck } from '@/components/QualityCheck'
 
 import { 
   scrapeProduct, 
@@ -42,6 +44,7 @@ import {
   downloadTxt,
   downloadJson,
 } from '@/lib/formatters'
+import { saveTranslationHistory } from '@/lib/storage'
 
 type AppStatus = 'idle' | 'scraping' | 'translating' | 'completed' | 'error'
 
@@ -89,6 +92,9 @@ export default function Home() {
       setTranslatedData(translateResult.data)
       setStatus('completed')
 
+      // 히스토리에 저장
+      saveTranslationHistory(scrapeResult.data, translateResult.data)
+
       toast({
         title: '번역 완료!',
         description: `${getLanguageDisplayName(language)}로 번역이 완료되었습니다.`,
@@ -114,6 +120,15 @@ export default function Home() {
     setError(null)
     setOriginalData(null)
     setTranslatedData(null)
+  }, [])
+
+  // 히스토리에서 불러오기
+  const handleLoadHistory = useCallback((original: ProductData, translated: TranslatedProduct) => {
+    setOriginalData(original)
+    setTranslatedData(translated)
+    setCurrentLanguage(translated.target_language)
+    setStatus('completed')
+    setError(null)
   }, [])
 
   // 전체 복사
@@ -247,6 +262,12 @@ export default function Home() {
       {/* URL 입력 폼 - idle 또는 error 상태에서 표시 */}
       {(status === 'idle' || status === 'error') && (
         <div className="max-w-2xl mx-auto mb-8 animate-slide-up">
+          {/* 히스토리 컴포넌트 */}
+          <TranslationHistory 
+            onLoadHistory={handleLoadHistory}
+            currentUrl={originalData?.url}
+          />
+          
           <UrlInputForm
             onSubmit={handleSubmit}
             isLoading={false}
@@ -351,6 +372,9 @@ export default function Home() {
               </Button>
             </div>
           </div>
+
+          {/* 품질 검증 */}
+          <QualityCheck data={translatedData} />
 
           {/* 탭 네비게이션 */}
           <Tabs defaultValue="content" className="w-full">
