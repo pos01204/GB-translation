@@ -9,7 +9,7 @@ git add -A
 
 echo.
 echo Committing...
-git commit -m "feat: Phase 1 improvements - prompts, OCR order, copy functions"
+git commit -m "feat: Phase 2 - Image-OCR mapping view, inline editing"
 
 echo.
 echo Pushing to origin...

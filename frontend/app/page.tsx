@@ -20,6 +20,7 @@ import { SideBySideView } from '@/components/SideBySideView'
 import { OptionTable } from '@/components/OptionTable'
 import { ImageOcrResults } from '@/components/ImageOcrResults'
 import { ImageGallery } from '@/components/ImageGallery'
+import { ImageOcrMapping } from '@/components/ImageOcrMapping'
 
 import { 
   scrapeProduct, 
@@ -205,6 +206,23 @@ export default function Home() {
   const handleEditDescription = useCallback((newDescription: string) => {
     if (translatedData) {
       setTranslatedData({ ...translatedData, translated_description: newDescription })
+    }
+  }, [translatedData])
+
+  // OCR 텍스트 수정 핸들러
+  const handleEditOcr = useCallback((index: number, newText: string) => {
+    if (translatedData) {
+      const updatedImageTexts = [...translatedData.translated_image_texts]
+      if (updatedImageTexts[index]) {
+        updatedImageTexts[index] = {
+          ...updatedImageTexts[index],
+          translated_text: newText
+        }
+        setTranslatedData({
+          ...translatedData,
+          translated_image_texts: updatedImageTexts
+        })
+      }
     }
   }, [translatedData])
 
@@ -419,21 +437,13 @@ export default function Home() {
               />
             </TabsContent>
 
-            {/* 이미지 OCR 탭 */}
+            {/* 이미지 OCR 탭 - 매핑 뷰 적용 */}
             <TabsContent value="ocr" className="mt-6">
-              {translatedData.translated_image_texts.length > 0 ? (
-                <ImageOcrResults
-                  imageTexts={translatedData.translated_image_texts}
-                />
-              ) : (
-                <Card>
-                  <CardContent className="py-12 text-center">
-                    <p className="text-muted-foreground">
-                      이미지에서 추출된 텍스트가 없습니다.
-                    </p>
-                  </CardContent>
-                </Card>
-              )}
+              <ImageOcrMapping
+                images={originalData.detail_images}
+                ocrResults={translatedData.translated_image_texts}
+                onEditOcr={handleEditOcr}
+              />
             </TabsContent>
           </Tabs>
         </div>

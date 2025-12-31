@@ -801,9 +801,9 @@ export function ImageOcrMapping({
 
 | 항목 | 설명 | 우선순위 | 예상 소요 |
 |------|------|----------|----------|
-| 내보내기 다양화 | TXT, CSV, 마켓플레이스 포맷 | P1 | 6시간 |
-| 이미지-OCR 매핑 뷰 | 시각적 매핑 UI | P1 | 6시간 |
-| 인라인 편집 | 번역 결과 직접 수정 | P1 | 4시간 |
+| ✅ 내보내기 다양화 | TXT, CSV, 마켓플레이스 포맷 | P1 | 6시간 |
+| ✅ 이미지-OCR 매핑 뷰 | 시각적 매핑 UI | P1 | 6시간 |
+| ✅ 인라인 편집 | 번역 결과 직접 수정 | P1 | 4시간 |
 
 ### Phase 3: 고급 기능 (3주차)
 
@@ -919,12 +919,66 @@ frontend/
 
 ---
 
+## 6. 구현 완료 내역
+
+### Phase 1 완료 (2024-12-31)
+
+| 항목 | 구현 내용 | 파일 |
+|------|----------|------|
+| ✅ 번역 프롬프트 | 일본어/영어 전문 프롬프트 적용 | `backend/app/prompts/` |
+| ✅ OCR 순서 정렬 | Y좌표 기반 이미지 추출 및 정렬 | `backend/app/scraper.py` |
+| ✅ 복사 기능 | 전체/부분 복사, 아이디어스 형식 | `frontend/lib/formatters.ts` |
+| ✅ 다운로드 | TXT/JSON 다운로드 | `frontend/app/page.tsx` |
+
+### Phase 2 완료 (2024-12-31)
+
+| 항목 | 구현 내용 | 파일 |
+|------|----------|------|
+| ✅ 이미지-OCR 매핑 뷰 | 썸네일 스트립, 선택 뷰, OCR 요약 | `frontend/components/ImageOcrMapping.tsx` |
+| ✅ 인라인 편집 | OCR 번역 결과 직접 수정 | `frontend/components/ImageOcrMapping.tsx` |
+| ✅ 순서 표시 | OCR 순서 번호 표시 | `frontend/components/ImageOcrMapping.tsx` |
+
+---
+
 ## 📌 다음 단계
 
-이 개선안을 바탕으로 **Phase 1 (핵심 품질 개선)** 부터 구현을 시작하시겠습니까?
+### Phase 3: 고급 기능 (예정)
 
-1. **번역 프롬프트 적용** - 공유해주신 프롬프트를 시스템에 통합
-2. **OCR 순서 정렬** - Y좌표 기반 이미지 순서 보장
-3. **복사 기능 강화** - 원클릭 복사 버튼 추가
+1. **용어집 관리** - 자주 쓰는 용어 일관성 유지
+2. **번역 히스토리** - 이전 결과 저장/불러오기
+3. **품질 검증** - 번역 품질 자동 체크
+
+### Phase 4: 확장 (예정)
+
+1. **다국어 확장** - 중국어, 태국어 등
+2. **배치 처리** - 다중 URL 일괄 번역
+3. **API 제공** - 외부 연동용 API
+
+---
+
+## 📊 작업 경과 요약
+
+```
+Phase 1 (핵심 품질 개선)
+├── ✅ 번역 프롬프트 시스템 구현
+│   ├── backend/app/prompts/__init__.py
+│   ├── backend/app/prompts/japanese.py
+│   └── backend/app/prompts/english.py
+├── ✅ OCR 순서 정렬 구현
+│   ├── backend/app/models.py (ImageText에 order_index, y_position 추가)
+│   └── backend/app/scraper.py (Y좌표 기반 이미지 추출)
+└── ✅ 복사 기능 강화
+    ├── frontend/lib/formatters.ts (포맷터 유틸리티)
+    ├── frontend/components/ui/dropdown-menu.tsx
+    └── frontend/app/page.tsx (복사/다운로드 버튼)
+
+Phase 2 (사용성 개선)
+├── ✅ 이미지-OCR 매핑 뷰
+│   └── frontend/components/ImageOcrMapping.tsx
+├── ✅ 인라인 편집 기능
+│   └── frontend/components/ImageOcrMapping.tsx (편집 모드)
+└── ✅ OCR 탭 UI 개선
+    └── frontend/app/page.tsx (매핑 뷰 적용)
+```
 
 구현을 원하시면 말씀해주세요! 🚀
