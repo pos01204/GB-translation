@@ -17,7 +17,7 @@ git add -A
 
 echo.
 echo [3/4] Creating commit...
-git commit -m "Fix: Support hierarchical options (2+ levels), sequential group extraction"
+git commit -m "Fix: f-string syntax error in option extraction, use page.evaluate with args"
 
 echo.
 echo [4/4] Pushing to remote...

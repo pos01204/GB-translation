@@ -376,38 +376,37 @@ class IdusScraper:
                 print(f"      📍 {group_idx}번 옵션 그룹 처리 중...")
                 
                 # 옵션 그룹 헤더 찾기 ("1. 핫케이크 높이" 형태)
-                group_data = await page.evaluate(f"""
-                    () => {{
-                        const groupIdx = {group_idx};
-                        const result = {{ name: null, values: [], headerElement: null }};
+                js_find_group = """
+                    (groupIdx) => {
+                        const result = { name: null, values: [], headerElement: null };
                         
                         // 옵션 그룹 헤더 찾기 (아코디언/드롭다운 형태)
                         const allElements = document.querySelectorAll('*');
                         let foundHeader = null;
                         let groupName = null;
                         
-                        for (const el of allElements) {{
+                        for (const el of allElements) {
                             const text = (el.innerText || el.textContent || '').trim();
                             
                             // "1. 핫케이크 높이" 또는 "1. 기타 옵션" 형태
                             const headerMatch = text.match(new RegExp('^' + groupIdx + '\\\\.\\\\s*(.+?)(?:\\\\s|$)'));
-                            if (headerMatch && text.length < 50) {{
+                            if (headerMatch && text.length < 50) {
                                 // 클릭 가능한 요소인지 확인
                                 const rect = el.getBoundingClientRect();
-                                if (rect.width > 50 && rect.height > 20) {{
+                                if (rect.width > 50 && rect.height > 20) {
                                     groupName = headerMatch[1].trim();
                                     foundHeader = el;
                                     break;
-                                }}
-                            }}
-                        }}
+                                }
+                            }
+                        }
                         
-                        if (groupName) {{
+                        if (groupName) {
                             result.name = groupName;
                             
                             // 해당 그룹의 옵션값 찾기
                             // 헤더 다음에 오는 옵션 리스트 탐색
-                            if (foundHeader) {{
+                            if (foundHeader) {
                                 let sibling = foundHeader.nextElementSibling;
                                 let parent = foundHeader.parentElement;
                                 
@@ -418,32 +417,33 @@ class IdusScraper:
                                     'li, [class*="select-item"], [class*="selectItem"]'
                                 );
                                 
-                                options.forEach(opt => {{
+                                options.forEach(opt => {
                                     const optText = (opt.innerText || '').trim().split('\\n')[0].trim();
                                     
                                     // 유효한 옵션값인지 확인
-                                    if (optText && optText.length >= 1 && optText.length <= 60) {{
+                                    if (optText && optText.length >= 1 && optText.length <= 60) {
                                         const noise = ['선택해주세요', '선택하세요', '확인', '취소', 
                                                       '닫기', '장바구니', '구매하기', '필수', '옵션'];
                                         const isNoise = noise.some(n => optText.includes(n));
                                         const isGroupHeader = /^\\d+\\./.test(optText);
                                         const isPriceOnly = /^[\\d,]+\\s*원?$/.test(optText);
                                         
-                                        if (!isNoise && !isGroupHeader && !isPriceOnly) {{
+                                        if (!isNoise && !isGroupHeader && !isPriceOnly) {
                                             // 가격 정보 제거
                                             let cleanValue = optText.replace(/\\s*\\(?[\\+\\-]?[\\d,]+\\s*원\\)?\\s*$/g, '').trim();
-                                            if (cleanValue.length >= 1 && !result.values.includes(cleanValue)) {{
+                                            if (cleanValue.length >= 1 && !result.values.includes(cleanValue)) {
                                                 result.values.push(cleanValue);
-                                            }}
-                                        }}
-                                    }}
-                                }});
-                            }}
-                        }}
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
                         
                         return result;
-                    }}
-                """)
+                    }
+                """
+                group_data = await page.evaluate(js_find_group, group_idx)
                 
                 # 그룹 헤더를 직접 클릭하여 옵션 펼치기
                 if group_data and group_data.get('name'):
@@ -460,11 +460,14 @@ class IdusScraper:
                         pass
                     
                     # 펼쳐진 후 옵션값 다시 추출
-                    expanded_values = await page.evaluate(f"""
-                        () => {{
+                    # group_name을 안전하게 이스케이프
+                    safe_group_name = group_name.replace('\\', '\\\\').replace('"', '\\"') if group_name else ''
+                    
+                    js_code = """
+                        (args) => {
                             const values = [];
-                            const groupIdx = {group_idx};
-                            const groupName = "{group_name.replace('"', '\\"')}";
+                            const groupIdx = args.groupIdx;
+                            const groupName = args.groupName;
                             
                             // 화면에 보이는 모든 텍스트에서 옵션값 패턴 찾기
                             // 특히 아코디언/드롭다운이 펼쳐진 상태에서
@@ -477,67 +480,68 @@ class IdusScraper:
                                 '[class*="dropdown-item"], [class*="dropdownItem"]'
                             );
                             
-                            optionElements.forEach(el => {{
+                            optionElements.forEach(el => {
                                 const rect = el.getBoundingClientRect();
                                 // 화면에 보이는 요소만
-                                if (rect.width > 0 && rect.height > 0) {{
+                                if (rect.width > 0 && rect.height > 0) {
                                     const text = (el.innerText || '').trim().split('\\n')[0].trim();
                                     
-                                    if (text && text.length >= 1 && text.length <= 60) {{
+                                    if (text && text.length >= 1 && text.length <= 60) {
                                         const noise = ['선택해', '확인', '취소', '닫기', '필수', '옵션 선택'];
                                         const isNoise = noise.some(n => text.includes(n));
                                         const isGroupHeader = /^\\d+\\./.test(text);
                                         const isPriceOnly = /^[\\d,]+\\s*원?$/.test(text);
                                         
-                                        if (!isNoise && !isGroupHeader && !isPriceOnly) {{
+                                        if (!isNoise && !isGroupHeader && !isPriceOnly) {
                                             let cleanValue = text.replace(/\\s*\\(?[\\+\\-]?[\\d,]+\\s*원\\)?\\s*$/g, '').trim();
-                                            if (cleanValue.length >= 1 && !values.includes(cleanValue)) {{
+                                            if (cleanValue.length >= 1 && !values.includes(cleanValue)) {
                                                 values.push(cleanValue);
-                                            }}
-                                        }}
-                                    }}
-                                }}
-                            }});
+                                            }
+                                        }
+                                    }
+                                }
+                            });
                             
                             // 방법 2: 그룹 헤더 아래의 텍스트 라인들
-                            if (values.length === 0) {{
+                            if (values.length === 0) {
                                 const allText = document.body.innerText || '';
                                 const lines = allText.split('\\n');
                                 let inGroup = false;
                                 
-                                for (let i = 0; i < lines.length; i++) {{
+                                for (let i = 0; i < lines.length; i++) {
                                     const line = lines[i].trim();
                                     
                                     // 현재 그룹 헤더 발견
-                                    if (line.startsWith(groupIdx + '.') || line.includes(groupName)) {{
+                                    if (line.startsWith(groupIdx + '.') || line.includes(groupName)) {
                                         inGroup = true;
                                         continue;
-                                    }}
+                                    }
                                     
                                     // 다음 그룹 헤더 발견 시 종료
-                                    if (inGroup && /^\\d+\\./.test(line)) {{
+                                    if (inGroup && /^\\d+\\./.test(line)) {
                                         break;
-                                    }}
+                                    }
                                     
                                     // 옵션값 수집
-                                    if (inGroup && line.length >= 1 && line.length <= 60) {{
+                                    if (inGroup && line.length >= 1 && line.length <= 60) {
                                         const noise = ['선택해', '확인', '취소', '닫기', '필수', '옵션'];
                                         const isNoise = noise.some(n => line.includes(n));
                                         const isPriceOnly = /^[\\d,]+\\s*원?$/.test(line);
                                         
-                                        if (!isNoise && !isPriceOnly && !/^\\d+\\./.test(line)) {{
+                                        if (!isNoise && !isPriceOnly && !/^\\d+\\./.test(line)) {
                                             let cleanValue = line.replace(/\\s*\\(?[\\+\\-]?[\\d,]+\\s*원\\)?\\s*$/g, '').trim();
-                                            if (cleanValue.length >= 1 && !values.includes(cleanValue)) {{
+                                            if (cleanValue.length >= 1 && !values.includes(cleanValue)) {
                                                 values.push(cleanValue);
-                                            }}
-                                        }}
-                                    }}
-                                }}
-                            }}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             
                             return values;
-                        }}
-                    """)
+                        }
+                    """
+                    expanded_values = await page.evaluate(js_code, {'groupIdx': group_idx, 'groupName': safe_group_name})
                     
                     final_values = expanded_values if expanded_values else group_data.get('values', [])
                     
