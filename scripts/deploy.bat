@@ -9,7 +9,7 @@ git add -A
 
 echo.
 echo Committing...
-git commit -m "feat: Phase 2 - Image-OCR mapping view, inline editing"
+git commit -m "fix: add missing Label component for ImageOcrMapping"
 
 echo.
 echo Pushing to origin...
