@@ -40,8 +40,17 @@ export function GlossaryManager({ onClose }: GlossaryManagerProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [isAdding, setIsAdding] = useState(false)
   
+  // 새 항목 폼 타입
+  type NewItemType = {
+    korean: string
+    english: string
+    japanese: string
+    category: string
+    notes: string
+  }
+  
   // 새 항목 폼
-  const [newItem, setNewItem] = useState({
+  const [newItem, setNewItem] = useState<NewItemType>({
     korean: '',
     english: '',
     japanese: '',
