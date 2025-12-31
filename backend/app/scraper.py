@@ -143,36 +143,22 @@ class IdusScraper:
             print("📷 상세페이지 이미지 추출 중...")
             detail_images_with_pos = await self._extract_images_with_position(page)
             
-            # 5. 위치 기반 이미지가 충분하면 해당 결과 사용
-            if len(detail_images_with_pos) >= 5:
+            # 5. 위치 기반 이미지가 있으면 해당 결과 사용 (최소 1개 이상)
+            if len(detail_images_with_pos) >= 1:
                 # 상세페이지 영역 이미지만 사용 (이미 Y좌표로 정렬됨)
                 filtered_images = [img['url'] for img in detail_images_with_pos]
                 filtered_images = self._filter_images(filtered_images)
                 print(f"   ✅ 상세페이지 영역 이미지 사용: {len(filtered_images)}개")
             else:
-                # 폴백: 전체 이미지에서 추출
-                print("   ⚠️ 상세페이지 이미지 부족, 전체 이미지에서 추출...")
-                
-                html_images = self._extract_images_from_html(html_content)
-                nuxt_images = self._extract_images_from_nuxt(html_content)
-                dom_images = await self._extract_images_from_dom(page)
-                
-                print(f"   HTML에서 추출: {len(html_images)}개")
-                print(f"   __NUXT__에서 추출: {len(nuxt_images)}개")
-                print(f"   DOM에서 추출: {len(dom_images)}개")
-                print(f"   네트워크에서 캡처: {len(network_images)}개")
+                # 폴백: 전체 이미지에서 추출 (DOM 경로 필터링 포함)
+                print("   ⚠️ 상세페이지 이미지 없음, 전체에서 추출 후 필터링...")
                 
                 all_images = set()
-                all_images.update(html_images)
-                all_images.update(nuxt_images)
-                all_images.update(dom_images)
                 all_images.update(network_images)
                 
-                filtered_images = self._filter_images(list(all_images))
-                
-                # 위치 기반 정렬 적용
-                if detail_images_with_pos:
-                    filtered_images = self._sort_images_by_position(filtered_images, detail_images_with_pos)
+                # 폴백에서도 필터링 강화
+                filtered_images = self._filter_images_strict(list(all_images), page)
+                print(f"   네트워크에서 캡처 후 필터링: {len(network_images)}개 → {len(filtered_images)}개")
             
             print(f"✅ 크롤링 완료: {title}")
             print(f"   - 작가: {artist_name}")
@@ -754,14 +740,13 @@ class IdusScraper:
             return []
 
     async def _extract_images_with_position(self, page: Page) -> list[dict]:
-        """상세페이지(작품정보 탭) 영역 내 이미지만 추출 - DOM 경로 기반 필터링"""
+        """상세페이지(작품정보 탭) 영역 내 이미지만 추출 - DOM 경로 기반 필터링 (개선버전)"""
         try:
             # 1단계: 작품정보 탭 클릭하여 해당 콘텐츠 활성화
             print("   📌 작품정보 탭 클릭 시도...")
             try:
                 tab_clicked = await page.evaluate("""
                     () => {
-                        // 작품정보 탭 찾기
                         const tabs = document.querySelectorAll('[role="tab"], button, a');
                         for (const tab of tabs) {
                             const text = (tab.innerText || tab.textContent || '').trim();
@@ -779,153 +764,167 @@ class IdusScraper:
             except:
                 pass
             
-            # 2단계: DOM 경로 기반 이미지 추출
+            # 2단계: DOM 경로 기반 이미지 추출 (개선된 로직)
             images = await page.evaluate("""
                 () => {
                     const images = [];
                     const seen = new Set();
                     const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
                     
-                    // ===== 제외할 부모 클래스 패턴 (정확한 매칭) =====
+                    // ===== 제외할 부모 클래스/ID 패턴 =====
                     const excludePatterns = [
-                        // 후기/리뷰 영역
-                        'review', 'photo-review', 'photoReview', '후기',
+                        // 후기/리뷰 영역 (중요!)
+                        'review', 'photo-review', 'photoReview', 'photo_review',
                         // 댓글 영역
-                        'comment', '댓글',
+                        'comment', 'qna',
                         // 추천/관련 상품 (가장 중요!)
-                        'recommend', 'related', 'similar', '추천', 'other-product',
-                        'also-like', 'you-may-like', 'more-product',
+                        'recommend', 'related', 'similar', 'other-product', 'otherProduct',
+                        'also-like', 'alsoLike', 'you-may', 'youMay', 'more-product', 'moreProduct',
+                        'products-you', 'productsYou', 'like-product', 'likeProduct',
                         // 작가/샵 다른 상품
-                        'artist-product', 'shop-product', 'seller-product',
-                        'artist-other', 'shop-other', 'more-from',
+                        'artist-product', 'artistProduct', 'shop-product', 'shopProduct',
+                        'seller-product', 'sellerProduct', 'artist-other', 'artistOther',
+                        'shop-other', 'shopOther', 'more-from', 'moreFrom',
                         // 헤더/푸터/네비게이션
-                        'header', 'footer', 'nav', 'gnb', 'lnb',
+                        'header', 'footer', 'nav-', '-nav', 'gnb', 'lnb',
                         // 배너/팝업
-                        'banner', 'popup', 'modal', 'toast', 'alert',
+                        'banner', 'popup', 'modal', 'toast', 'alert', 'notice',
                         // 장바구니/구매 영역
-                        'cart', 'purchase', 'buy-area', 'order',
-                        // 썸네일 슬라이더 (상단 메인 이미지 영역)
-                        'thumbnail', 'thumb-list', 'thumbList', 'slider-thumb',
+                        'cart', 'purchase', 'buy-area', 'buyArea', 'order-',
+                        // 썸네일 슬라이더 (상단 메인 이미지 - 이건 포함해도 됨)
+                        // 'thumbnail', 'thumb-list', 
                         // 프로필/아바타
-                        'profile', 'avatar', 'user-info'
+                        'profile', 'avatar', 'user-info', 'userInfo',
+                        // 리스트/그리드 형태 상품 목록
+                        'product-list', 'productList', 'item-list', 'itemList',
+                        'product-grid', 'productGrid', 'item-grid', 'itemGrid',
+                        'swiper-slide'  // 추천상품 슬라이더
                     ];
                     
-                    // ===== 포함할 부모 클래스 패턴 =====
-                    const includePatterns = [
-                        'detail-content', 'detailContent',
-                        'product-detail', 'productDetail',
-                        'product-info', 'productInfo',
-                        'description', 'desc-area',
-                        'content-area', 'contentArea',
-                        'detail-area', 'detailArea',
-                        'article', 'main-content'
-                    ];
-                    
-                    // ===== "작품 정보 접기/더보기" 버튼 위치 찾기 =====
+                    // ===== 상세페이지 영역 경계 찾기 =====
+                    let detailStartY = 0;
                     let detailEndY = Infinity;
-                    const foldButtons = document.querySelectorAll('button');
-                    for (const btn of foldButtons) {
+                    
+                    // "작품 정보 접기/더보기" 버튼으로 경계 찾기
+                    const allButtons = document.querySelectorAll('button');
+                    for (const btn of allButtons) {
                         const text = (btn.innerText || '').trim();
-                        if (text.includes('작품 정보 접기') || text.includes('작품 정보 더보기')) {
+                        if (text.includes('작품 정보 접기')) {
                             const rect = btn.getBoundingClientRect();
-                            // 접기 버튼 아래는 상세페이지가 아님
-                            if (text.includes('접기')) {
-                                detailEndY = rect.bottom + scrollTop + 50;
-                            }
+                            detailEndY = rect.bottom + scrollTop + 100;  // 접기 버튼 아래 100px까지만
+                            console.log('접기 버튼 발견, detailEndY:', detailEndY);
                             break;
                         }
                     }
                     
-                    // ===== 후기 섹션 시작 위치 찾기 =====
-                    const reviewHeaders = document.querySelectorAll('*');
-                    for (const el of reviewHeaders) {
-                        const text = (el.innerText || '').trim();
-                        // "후기(숫자)" 패턴 찾기
-                        if (/^후기\\s*\\(\\d+\\)/.test(text) || /^후기\\d*$/.test(text)) {
+                    // "후기" 탭/섹션 헤더 위치로 경계 찾기 (더 정확한 방법)
+                    const allElements = document.querySelectorAll('[role="tab"], h2, h3, [class*="section-title"]');
+                    for (const el of allElements) {
+                        const text = (el.innerText || el.textContent || '').trim();
+                        if (/^후기/.test(text) && text.length < 20) {
                             const rect = el.getBoundingClientRect();
                             const y = rect.top + scrollTop;
                             if (y > 500 && y < detailEndY) {
-                                detailEndY = y - 20;
+                                detailEndY = y - 50;  // 후기 섹션 50px 전까지만
+                                console.log('후기 섹션 발견, detailEndY:', detailEndY);
                                 break;
                             }
                         }
                     }
                     
+                    // 탭 헤더 위치로 상세정보 시작점 찾기
+                    const tabLists = document.querySelectorAll('[role="tablist"]');
+                    for (const tabList of tabLists) {
+                        const rect = tabList.getBoundingClientRect();
+                        detailStartY = rect.bottom + scrollTop;
+                        console.log('탭 헤더 발견, detailStartY:', detailStartY);
+                        break;
+                    }
+                    
+                    console.log('상세페이지 영역:', detailStartY, '~', detailEndY);
+                    
                     // ===== 이미지 수집 =====
                     document.querySelectorAll('img').forEach((img, domIndex) => {
-                        // URL 추출
+                        // URL 추출 (여러 속성 시도)
                         const url = img.src || img.getAttribute('data-src') || 
-                                   img.getAttribute('data-original') || img.getAttribute('data-lazy-src');
+                                   img.getAttribute('data-original') || img.getAttribute('data-lazy-src') ||
+                                   img.dataset?.src || img.dataset?.original;
                         
                         if (!url || !url.includes('idus') || seen.has(url)) return;
                         
-                        // URL 패턴으로 제외
+                        // URL 패턴으로 명백한 제외
                         const urlLower = url.toLowerCase();
                         if (urlLower.includes('/profile') || urlLower.includes('/avatar') ||
                             urlLower.includes('/icon') || urlLower.includes('/badge') ||
-                            urlLower.includes('/thumb_') || urlLower.includes('/thumbnail') ||
                             urlLower.includes('_50.') || urlLower.includes('_100.') ||
-                            urlLower.includes('_150.') || urlLower.includes('_200.') ||
-                            urlLower.includes('_250.')) {
+                            urlLower.includes('_150.') || urlLower.includes('_200.')) {
                             return;
                         }
                         
-                        // 이미지 크기 체크
+                        // 이미지 위치/크기 정보
                         const rect = img.getBoundingClientRect();
-                        if (rect.width < 280 || rect.height < 200) return;
+                        const imgY = rect.top + scrollTop;
+                        const imgX = rect.left;
+                        
+                        // 크기 체크 (최소 100px - lazy loading 대응)
+                        const width = rect.width || img.naturalWidth || parseInt(img.getAttribute('width')) || 0;
+                        const height = rect.height || img.naturalHeight || parseInt(img.getAttribute('height')) || 0;
+                        
+                        // 아주 작은 이미지만 제외 (아이콘 등)
+                        if (width > 0 && width < 100) return;
+                        if (height > 0 && height < 100) return;
                         
                         // Y 위치 체크 (상세페이지 영역 내)
-                        const imgY = rect.top + scrollTop;
-                        if (imgY > detailEndY) return;
+                        if (detailEndY < Infinity && imgY > detailEndY) {
+                            console.log('Y 위치 초과로 제외:', imgY, '>', detailEndY, url.substring(0, 50));
+                            return;
+                        }
                         
                         // ===== DOM 경로 추적하여 제외 영역 체크 =====
                         let el = img.parentElement;
                         let inExcludedArea = false;
-                        let inIncludedArea = false;
+                        let excludeReason = '';
                         let depth = 0;
-                        const maxDepth = 15;
+                        const maxDepth = 20;  // 더 깊이 탐색
                         
                         while (el && el !== document.body && depth < maxDepth) {
-                            const classes = (el.className || '').toLowerCase();
+                            const classes = (el.className || '').toString().toLowerCase();
                             const id = (el.id || '').toLowerCase();
                             const combined = classes + ' ' + id;
                             
-                            // 제외 영역 체크
+                            // 제외 패턴 체크
                             for (const pattern of excludePatterns) {
-                                if (combined.includes(pattern)) {
+                                if (combined.includes(pattern.toLowerCase())) {
                                     inExcludedArea = true;
+                                    excludeReason = pattern;
                                     break;
                                 }
                             }
                             if (inExcludedArea) break;
-                            
-                            // 포함 영역 체크
-                            for (const pattern of includePatterns) {
-                                if (combined.includes(pattern)) {
-                                    inIncludedArea = true;
-                                    break;
-                                }
-                            }
                             
                             el = el.parentElement;
                             depth++;
                         }
                         
                         // 제외 영역에 있으면 건너뛰기
-                        if (inExcludedArea) return;
+                        if (inExcludedArea) {
+                            console.log('DOM 경로 제외:', excludeReason, url.substring(0, 50));
+                            return;
+                        }
                         
                         seen.add(url);
                         
                         images.push({
                             url: url,
                             y_position: imgY,
-                            x_position: rect.left,
-                            width: rect.width,
-                            height: rect.height,
-                            dom_index: domIndex,
-                            in_detail_area: inIncludedArea
+                            x_position: imgX,
+                            width: width,
+                            height: height,
+                            dom_index: domIndex
                         });
                     });
+                    
+                    console.log('수집된 이미지:', images.length);
                     
                     // Y좌표로 정렬
                     return images.sort((a, b) => {
@@ -939,8 +938,7 @@ class IdusScraper:
             
             print(f"   📷 DOM 경로 기반 이미지 추출: {len(images)}개")
             if images:
-                in_detail = sum(1 for img in images if img.get('in_detail_area'))
-                print(f"      상세영역 내: {in_detail}개, Y 범위: {images[0].get('y_position', 0):.0f} ~ {images[-1].get('y_position', 0):.0f}")
+                print(f"      Y 범위: {images[0].get('y_position', 0):.0f} ~ {images[-1].get('y_position', 0):.0f}")
             return images or []
         except Exception as e:
             print(f"위치 기반 이미지 추출 오류: {e}")
@@ -1038,7 +1036,63 @@ class IdusScraper:
                 pass
         
         print(f"📷 이미지 필터링: {len(images)}개 → {len(result)}개")
-        return result[:100]  # 최대 100개 (상세페이지 이미지만)
+        return result[:15]  # 최대 15개로 제한 (OCR 시간 단축)
+    
+    def _filter_images_strict(self, images: list[str], page: Page = None) -> list[str]:
+        """엄격한 이미지 필터링 - 폴백 시 사용"""
+        
+        # 상세페이지 이미지로 추정되는 URL 패턴만 허용
+        result = []
+        seen_file_ids = set()
+        
+        for img in images:
+            if not img or not isinstance(img, str):
+                continue
+            if not img.startswith('http'):
+                continue
+            
+            low = img.lower()
+            
+            # Idus CDN만 허용
+            if 'image.idus.com' not in low:
+                continue
+            
+            # 파일 ID 추출
+            match = re.search(r'files/([a-f0-9]+)', low)
+            if not match:
+                continue
+            
+            file_id = match.group(1)
+            
+            # 중복 파일 ID 제외
+            if file_id in seen_file_ids:
+                continue
+            
+            # 크기 정보 추출
+            size_match = re.search(r'_(\d+)\.', low)
+            if size_match:
+                size = int(size_match.group(1))
+                # 400px 이상만 (엄격한 필터)
+                if size < 400:
+                    continue
+            
+            # 명백한 제외 패턴
+            exclude_patterns = [
+                '/profile', '/avatar', '/icon', '/badge',
+                '/thumb_', '/thumbnail', '_thumb',
+                '/review', '/comment',
+                '/artist/', '/shop/',
+                '_50.', '_100.', '_150.', '_200.', '_250.', '_300.'
+            ]
+            
+            skip = any(p in low for p in exclude_patterns)
+            if skip:
+                continue
+            
+            seen_file_ids.add(file_id)
+            result.append(img)
+        
+        return result[:20]  # 엄격 필터는 20개로 더 제한
     
     def _sort_images_by_position(self, images: list[str], position_data: list[dict]) -> list[str]:
         """위치 정보를 기반으로 이미지 정렬 (페이지 순서 보장)"""

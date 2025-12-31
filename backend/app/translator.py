@@ -195,7 +195,7 @@ class ProductTranslator:
         )
         
         # 4. OCR (고해상도 이미지 우선, Rate Limit 고려)
-        max_ocr = int(os.getenv("MAX_OCR_IMAGES", "15"))  # 기본값 15개
+        max_ocr = int(os.getenv("MAX_OCR_IMAGES", "10"))  # 기본값 10개 (Rate Limit 대응)
         
         # 고해상도 이미지 우선 정렬 (_720, _800 등)
         sorted_images = self._prioritize_high_res_images(product_data.detail_images)

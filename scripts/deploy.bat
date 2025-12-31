@@ -2,7 +2,7 @@
 chcp 65001 > nul
 echo ========================================
 echo    Idus Translator Deploy Script
-echo    Fix: DOM Path Based Image Filtering
+echo    Fix: Image Filtering + OCR Optimization
 echo ========================================
 echo.
 
@@ -17,7 +17,7 @@ git add -A
 
 echo.
 echo [3/4] Creating commit...
-git commit -m "Fix: DOM path based image filtering - exclude recommend/review areas"
+git commit -m "Fix: Improved image filtering, reduced OCR limit to 10 for faster processing"
 
 echo.
 echo [4/4] Pushing to remote...
@@ -31,14 +31,11 @@ echo.
 echo Frontend (Vercel): https://gb-translation.vercel.app
 echo Backend (Railway): Auto-deploy triggered
 echo.
-echo Image Filtering Improvements:
-echo   1. DOM path based exclusion:
-echo      - recommend, related, similar
-echo      - review, comment
-echo      - artist-product, shop-product
-echo   2. Click "product info" tab first
-echo   3. Find "fold/more info" button position
-echo   4. Find "review(N)" section position
-echo   5. Minimum size filter (280x200px)
+echo Improvements:
+echo   1. DOM path based image exclusion (recommend, review, etc.)
+echo   2. Y-position based detail area detection
+echo   3. Max 15 images from scraper (was 30+)
+echo   4. Max 10 images for OCR (was 15)
+echo   5. Strict fallback filtering (400px+ only)
 echo.
 pause
