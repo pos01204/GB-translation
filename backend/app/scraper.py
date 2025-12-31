@@ -321,280 +321,256 @@ class IdusScraper:
         return "설명 없음"
 
     async def _get_options(self, page: Page) -> list[ProductOption]:
-        """옵션 추출 - "옵션을 선택해주세요" 버튼 클릭 방식 우선"""
+        """옵션 추출 - 계층형 옵션 구조 지원 (2단 이상 옵션)"""
         options: list[ProductOption] = []
         
         try:
-            # 방법 1: "옵션을 선택해주세요" 버튼 클릭하여 옵션 패널에서 추출 (가장 정확)
-            print("   📌 옵션 선택 버튼 클릭하여 옵션 추출 시도...")
+            print("   📌 계층형 옵션 추출 시작...")
             
-            # 다양한 선택자로 옵션 선택 버튼/영역 찾기
-            option_selectors = [
-                'button:has-text("옵션을 선택해주세요")',
-                'button:has-text("옵션 선택")',
-                'div:has-text("옵션을 선택해주세요")',
+            # 1단계: 옵션 영역 찾기 및 클릭
+            option_area_selectors = [
+                'text="옵션을 선택해주세요"',
+                'text="옵션 선택"',
                 '[class*="option-select"]',
                 '[class*="optionSelect"]',
-                '[class*="option"] button',
-                '[class*="select-option"]',
+                'button:has-text("옵션")',
             ]
             
-            option_trigger = None
-            for selector in option_selectors:
+            option_area = None
+            for selector in option_area_selectors:
                 try:
-                    option_trigger = await page.query_selector(selector)
-                    if option_trigger:
-                        # 클릭 가능한지 확인
-                        is_visible = await option_trigger.is_visible()
-                        if is_visible:
-                            print(f"      옵션 버튼 발견: {selector}")
-                            break
-                        else:
-                            option_trigger = None
+                    option_area = await page.query_selector(selector)
+                    if option_area and await option_area.is_visible():
+                        print(f"      옵션 영역 발견: {selector}")
+                        break
+                    option_area = None
                 except:
                     continue
             
-            if option_trigger:
-                await option_trigger.click()
-                await asyncio.sleep(1.5)  # 옵션 패널 로드 대기
+            if not option_area:
+                print("      ⚠️ 옵션 영역을 찾을 수 없음, 후기에서 추출 시도...")
+                return await self._get_options_from_reviews(page)
+            
+            # 2단계: 옵션 영역 클릭하여 옵션 패널 열기
+            await option_area.click()
+            await asyncio.sleep(1)
+            
+            # 3단계: 옵션 그룹 개수 파악 (옵션 선택 (0/2) 형태)
+            option_info = await page.evaluate("""
+                () => {
+                    // "옵션 선택 (0/2)" 또는 "옵션 선택(0/2)" 형태에서 총 옵션 그룹 수 추출
+                    const allText = document.body.innerText || '';
+                    const match = allText.match(/옵션\\s*선택\\s*\\(?\\s*(\\d+)\\s*\\/\\s*(\\d+)\\s*\\)?/);
+                    if (match) {
+                        return { current: parseInt(match[1]), total: parseInt(match[2]) };
+                    }
+                    return null;
+                }
+            """)
+            
+            total_groups = option_info['total'] if option_info else 1
+            print(f"      옵션 그룹 수: {total_groups}개")
+            
+            # 4단계: 각 옵션 그룹을 순차적으로 클릭하여 옵션값 추출
+            for group_idx in range(1, total_groups + 1):
+                print(f"      📍 {group_idx}번 옵션 그룹 처리 중...")
                 
-                # 옵션 패널에서 옵션 추출
-                panel_options = await page.evaluate("""
-                    () => {
-                        const result = [];
-                        const optionGroups = {};
+                # 옵션 그룹 헤더 찾기 ("1. 핫케이크 높이" 형태)
+                group_data = await page.evaluate(f"""
+                    () => {{
+                        const groupIdx = {group_idx};
+                        const result = {{ name: null, values: [], headerElement: null }};
                         
-                        // 옵션 패널/바텀시트/드롭다운 찾기
-                        const panels = document.querySelectorAll(
-                            '[role="dialog"], [role="listbox"], [role="menu"], ' +
-                            '[class*="bottom-sheet"], [class*="bottomSheet"], ' +
-                            '[class*="option-panel"], [class*="optionPanel"], ' +
-                            '[class*="option-list"], [class*="optionList"], ' +
-                            '[class*="dropdown"], [class*="select-panel"], ' +
-                            '[class*="modal"], [class*="drawer"]'
-                        );
+                        // 옵션 그룹 헤더 찾기 (아코디언/드롭다운 형태)
+                        const allElements = document.querySelectorAll('*');
+                        let foundHeader = null;
+                        let groupName = null;
                         
-                        for (const panel of panels) {
-                            const rect = panel.getBoundingClientRect();
-                            // 화면에 보이는 패널만 처리
-                            if (rect.width < 50 || rect.height < 50) continue;
+                        for (const el of allElements) {{
+                            const text = (el.innerText || el.textContent || '').trim();
                             
-                            const allText = panel.innerText || '';
-                            const lines = allText.split('\\n');
+                            // "1. 핫케이크 높이" 또는 "1. 기타 옵션" 형태
+                            const headerMatch = text.match(new RegExp('^' + groupIdx + '\\\\.\\\\s*(.+?)(?:\\\\s|$)'));
+                            if (headerMatch && text.length < 50) {{
+                                // 클릭 가능한 요소인지 확인
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 50 && rect.height > 20) {{
+                                    groupName = headerMatch[1].trim();
+                                    foundHeader = el;
+                                    break;
+                                }}
+                            }}
+                        }}
+                        
+                        if (groupName) {{
+                            result.name = groupName;
                             
-                            let currentGroup = null;
-                            
-                            for (const line of lines) {
-                                const trimmed = line.trim();
-                                if (!trimmed) continue;
+                            // 해당 그룹의 옵션값 찾기
+                            // 헤더 다음에 오는 옵션 리스트 탐색
+                            if (foundHeader) {{
+                                let sibling = foundHeader.nextElementSibling;
+                                let parent = foundHeader.parentElement;
                                 
-                                // "1. 쿠키 선택 (필수)" 또는 "쿠키 선택" 형식의 그룹 헤더
-                                const groupMatch = trimmed.match(/^(?:(\\d+)\\.\\s*)?(.+?)(?:\\s*\\(필수\\))?\\s*$/);
-                                if (groupMatch) {
-                                    const potentialGroup = groupMatch[2].trim();
-                                    // 그룹 이름으로 적합한지 확인
-                                    if (potentialGroup.includes('선택') && 
-                                        potentialGroup.length >= 2 && potentialGroup.length <= 30 &&
-                                        !potentialGroup.includes('원') && !potentialGroup.includes('구매')) {
-                                        currentGroup = potentialGroup;
-                                        if (!optionGroups[currentGroup]) {
-                                            optionGroups[currentGroup] = [];
-                                        }
-                                        continue;
-                                    }
-                                }
+                                // 같은 부모 내에서 옵션값 찾기
+                                const searchContainer = parent || document.body;
+                                const options = searchContainer.querySelectorAll(
+                                    '[role="option"], [class*="option-item"], [class*="optionItem"], ' +
+                                    'li, [class*="select-item"], [class*="selectItem"]'
+                                );
                                 
-                                // 옵션 값 수집
-                                if (currentGroup && trimmed.length >= 2 && trimmed.length <= 80) {
-                                    const noise = ['선택해주세요', '선택하세요', '확인', '취소', '닫기', 
-                                                  '장바구니', '구매하기', '필수', '총 상품금액', 
-                                                  '배송비', '수량', '품절', '옵션을'];
-                                    const isNoise = noise.some(n => trimmed.includes(n));
-                                    const isPriceOnly = /^[\\d,]+\\s*원?$/.test(trimmed);
-                                    const isNumber = /^\\d+$/.test(trimmed);
+                                options.forEach(opt => {{
+                                    const optText = (opt.innerText || '').trim().split('\\n')[0].trim();
                                     
-                                    if (!isNoise && !isPriceOnly && !isNumber && !/^\\d+\\.\\s*[가-힣]/.test(trimmed)) {
-                                        // 가격 정보 제거 (옵션값 뒤의 가격)
-                                        let cleanValue = trimmed.replace(/\\s*[\\(\\[]?[\\+\\-]?[\\d,]+\\s*원[\\)\\]]?\\s*$/g, '').trim();
-                                        if (cleanValue.length >= 2 && !optionGroups[currentGroup].includes(cleanValue)) {
-                                            optionGroups[currentGroup].push(cleanValue);
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            // role="option" 요소에서도 추출
-                            const optionItems = panel.querySelectorAll('[role="option"], [class*="option-item"], [class*="optionItem"], li');
-                            if (optionItems.length > 0 && Object.keys(optionGroups).length === 0) {
-                                const values = [];
-                                optionItems.forEach(item => {
-                                    const text = (item.innerText || '').trim().split('\\n')[0].trim();
-                                    if (text && text.length >= 2 && text.length <= 60) {
-                                        const noise = ['선택해', '확인', '취소', '닫기', '품절'];
-                                        if (!noise.some(n => text.includes(n))) {
-                                            let cleanText = text.replace(/\\s*[\\(\\[]?[\\+\\-]?[\\d,]+\\s*원[\\)\\]]?\\s*$/g, '').trim();
-                                            if (cleanText.length >= 2) {
-                                                values.push(cleanText);
-                                            }
-                                        }
-                                    }
-                                });
-                                if (values.length > 0) {
-                                    optionGroups['옵션'] = values;
-                                }
-                            }
-                        }
-                        
-                        for (const [name, values] of Object.entries(optionGroups)) {
-                            if (values.length > 0) {
-                                result.push({ name, values: [...new Set(values)] });
-                            }
-                        }
+                                    // 유효한 옵션값인지 확인
+                                    if (optText && optText.length >= 1 && optText.length <= 60) {{
+                                        const noise = ['선택해주세요', '선택하세요', '확인', '취소', 
+                                                      '닫기', '장바구니', '구매하기', '필수', '옵션'];
+                                        const isNoise = noise.some(n => optText.includes(n));
+                                        const isGroupHeader = /^\\d+\\./.test(optText);
+                                        const isPriceOnly = /^[\\d,]+\\s*원?$/.test(optText);
+                                        
+                                        if (!isNoise && !isGroupHeader && !isPriceOnly) {{
+                                            // 가격 정보 제거
+                                            let cleanValue = optText.replace(/\\s*\\(?[\\+\\-]?[\\d,]+\\s*원\\)?\\s*$/g, '').trim();
+                                            if (cleanValue.length >= 1 && !result.values.includes(cleanValue)) {{
+                                                result.values.push(cleanValue);
+                                            }}
+                                        }}
+                                    }}
+                                }});
+                            }}
+                        }}
                         
                         return result;
-                    }
+                    }}
                 """)
                 
-                if panel_options:
-                    for opt in panel_options:
-                        if opt.get('values') and len(opt['values']) > 0:
-                            options.append(ProductOption(name=opt['name'], values=opt['values']))
-                            print(f"      ✅ 옵션 패널에서 추출: {opt['name']}: {opt['values']}")
-                
-                # 패널 닫기
-                await page.keyboard.press("Escape")
-                await asyncio.sleep(0.3)
-            
-            # 방법 2: 후기에서 옵션 정보 추출 (백업 - 후기가 있는 경우)
-            if not options:
-                print("   📌 후기에서 옵션 정보 추출 시도...")
-                review_options = await page.evaluate("""
-                    () => {
-                        const optionGroups = {};
-                        
-                        // 전체 페이지 텍스트에서 옵션 패턴 찾기
-                        const allText = document.body.innerText || '';
-                        
-                        // 패턴: "옵션명 선택: 옵션값"
-                        // 예: "쿠키 선택: 세인트릴리 쿠키 (파랑술)"
-                        const patterns = [
-                            /([가-힣a-zA-Z]+\\s*선택)\\s*[：:]\\s*([가-힣a-zA-Z0-9\\s\\(\\)\\[\\]]+?)(?=\\s*\\*|\\s*[,\\n]|$)/g,
-                            /구매작품\\s*[：:]\\s*([가-힣a-zA-Z]+\\s*선택)\\s*[：:]\\s*([가-힣a-zA-Z0-9\\s\\(\\)\\[\\]]+?)(?=\\s*\\*|\\s*[,\\n]|$)/g
-                        ];
-                        
-                        for (const pattern of patterns) {
-                            const matches = allText.matchAll(pattern);
-                            for (const match of matches) {
-                                let optName = match[1].trim();
-                                let optValue = match[2].trim().replace(/\\s+/g, ' ');
-                                
-                                if (optName && optValue &&
-                                    optName.length >= 2 && optName.length <= 30 && 
-                                    optValue.length >= 2 && optValue.length <= 80) {
-                                    
-                                    if (!optionGroups[optName]) {
-                                        optionGroups[optName] = new Set();
-                                    }
-                                    optionGroups[optName].add(optValue);
-                                }
-                            }
-                        }
-                        
-                        const result = [];
-                        for (const [name, values] of Object.entries(optionGroups)) {
-                            if (values.size > 0) {
-                                result.push({ name, values: Array.from(values) });
-                            }
-                        }
-                        return result;
-                    }
-                """)
-                
-                if review_options:
-                    for opt in review_options:
-                        if opt.get('values') and len(opt['values']) > 0:
-                            options.append(ProductOption(name=opt['name'], values=opt['values']))
-                            print(f"      ✅ 후기에서 추출: {opt['name']}: {opt['values']}")
-            
-            # 방법 3: 구매하기 버튼 클릭 후 바텀시트에서 추출
-            if not options:
-                print("   📌 구매하기 버튼 클릭하여 바텀시트에서 옵션 추출 시도...")
-                buy_button = await page.query_selector('button:has-text("구매하기")')
-                
-                if buy_button:
-                    await buy_button.click()
-                    await asyncio.sleep(2)
+                # 그룹 헤더를 직접 클릭하여 옵션 펼치기
+                if group_data and group_data.get('name'):
+                    group_name = group_data['name']
                     
-                    sheet_options = await page.evaluate("""
-                        () => {
-                            const result = [];
-                            const optionGroups = {};
+                    # 그룹 헤더 클릭 (아코디언 펼치기)
+                    try:
+                        header_selector = f'text="{group_idx}. {group_name}"'
+                        header_el = await page.query_selector(header_selector)
+                        if header_el:
+                            await header_el.click()
+                            await asyncio.sleep(0.5)
+                    except:
+                        pass
+                    
+                    # 펼쳐진 후 옵션값 다시 추출
+                    expanded_values = await page.evaluate(f"""
+                        () => {{
+                            const values = [];
+                            const groupIdx = {group_idx};
+                            const groupName = "{group_name.replace('"', '\\"')}";
                             
-                            // 바텀시트/모달 찾기
-                            const containers = document.querySelectorAll(
-                                '[role="dialog"], [class*="bottom-sheet"], [class*="bottomSheet"], ' +
-                                '[class*="modal"], [class*="drawer"], [class*="option-select"], ' +
-                                '[class*="optionSelect"], [class*="purchase"]'
+                            // 화면에 보이는 모든 텍스트에서 옵션값 패턴 찾기
+                            // 특히 아코디언/드롭다운이 펼쳐진 상태에서
+                            
+                            // 방법 1: role="option" 또는 li 요소
+                            const optionElements = document.querySelectorAll(
+                                '[role="option"], [role="listitem"], ' +
+                                '[class*="option-item"], [class*="optionItem"], ' +
+                                '[class*="select-item"], [class*="selectItem"], ' +
+                                '[class*="dropdown-item"], [class*="dropdownItem"]'
                             );
                             
-                            for (const container of containers) {
-                                const allText = container.innerText || '';
-                                const lines = allText.split('\\n');
-                                
-                                let currentGroup = null;
-                                
-                                for (const line of lines) {
-                                    const trimmed = line.trim();
-                                    if (!trimmed) continue;
+                            optionElements.forEach(el => {{
+                                const rect = el.getBoundingClientRect();
+                                // 화면에 보이는 요소만
+                                if (rect.width > 0 && rect.height > 0) {{
+                                    const text = (el.innerText || '').trim().split('\\n')[0].trim();
                                     
-                                    // "1. 쿠키 선택 (필수)" 형식의 그룹 헤더
-                                    const groupMatch = trimmed.match(/^(\\d+)\\.?\\s*(.+?)(?:\\s*\\(필수\\))?\\s*$/);
-                                    if (groupMatch && !trimmed.includes('원') && trimmed.length <= 30) {
-                                        currentGroup = groupMatch[2].trim();
-                                        if (!optionGroups[currentGroup]) {
-                                            optionGroups[currentGroup] = [];
-                                        }
-                                        continue;
-                                    }
-                                    
-                                    // 옵션 값
-                                    if (currentGroup && trimmed.length >= 2 && trimmed.length <= 60) {
-                                        const noise = ['선택해주세요', '선택하세요', '확인', '취소', '닫기', 
-                                                      '장바구니', '구매하기', '필수', '총 상품금액', 
-                                                      '배송비', '수량', '품절'];
-                                        const isNoise = noise.some(n => trimmed.includes(n));
-                                        const isPriceOnly = /^[\\d,]+\\s*원?$/.test(trimmed);
-                                        const isNumber = /^\\d+$/.test(trimmed);
+                                    if (text && text.length >= 1 && text.length <= 60) {{
+                                        const noise = ['선택해', '확인', '취소', '닫기', '필수', '옵션 선택'];
+                                        const isNoise = noise.some(n => text.includes(n));
+                                        const isGroupHeader = /^\\d+\\./.test(text);
+                                        const isPriceOnly = /^[\\d,]+\\s*원?$/.test(text);
                                         
-                                        if (!isNoise && !isPriceOnly && !isNumber && !/^\\d+\\./.test(trimmed)) {
-                                            let cleanValue = trimmed.replace(/\\s*[\\(\\[]?[\\+\\-]?[\\d,]+\\s*원[\\)\\]]?\\s*$/g, '').trim();
-                                            if (cleanValue.length >= 2 && !optionGroups[currentGroup].includes(cleanValue)) {
-                                                optionGroups[currentGroup].push(cleanValue);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                                        if (!isNoise && !isGroupHeader && !isPriceOnly) {{
+                                            let cleanValue = text.replace(/\\s*\\(?[\\+\\-]?[\\d,]+\\s*원\\)?\\s*$/g, '').trim();
+                                            if (cleanValue.length >= 1 && !values.includes(cleanValue)) {{
+                                                values.push(cleanValue);
+                                            }}
+                                        }}
+                                    }}
+                                }}
+                            }});
                             
-                            for (const [name, values] of Object.entries(optionGroups)) {
-                                if (values.length > 0) {
-                                    result.push({ name, values: [...new Set(values)] });
-                                }
-                            }
+                            // 방법 2: 그룹 헤더 아래의 텍스트 라인들
+                            if (values.length === 0) {{
+                                const allText = document.body.innerText || '';
+                                const lines = allText.split('\\n');
+                                let inGroup = false;
+                                
+                                for (let i = 0; i < lines.length; i++) {{
+                                    const line = lines[i].trim();
+                                    
+                                    // 현재 그룹 헤더 발견
+                                    if (line.startsWith(groupIdx + '.') || line.includes(groupName)) {{
+                                        inGroup = true;
+                                        continue;
+                                    }}
+                                    
+                                    // 다음 그룹 헤더 발견 시 종료
+                                    if (inGroup && /^\\d+\\./.test(line)) {{
+                                        break;
+                                    }}
+                                    
+                                    // 옵션값 수집
+                                    if (inGroup && line.length >= 1 && line.length <= 60) {{
+                                        const noise = ['선택해', '확인', '취소', '닫기', '필수', '옵션'];
+                                        const isNoise = noise.some(n => line.includes(n));
+                                        const isPriceOnly = /^[\\d,]+\\s*원?$/.test(line);
+                                        
+                                        if (!isNoise && !isPriceOnly && !/^\\d+\\./.test(line)) {{
+                                            let cleanValue = line.replace(/\\s*\\(?[\\+\\-]?[\\d,]+\\s*원\\)?\\s*$/g, '').trim();
+                                            if (cleanValue.length >= 1 && !values.includes(cleanValue)) {{
+                                                values.push(cleanValue);
+                                            }}
+                                        }}
+                                    }}
+                                }}
+                            }}
                             
-                            return result;
-                        }
+                            return values;
+                        }}
                     """)
                     
-                    if sheet_options:
-                        for opt in sheet_options:
-                            if opt.get('values') and len(opt['values']) > 0:
-                                options.append(ProductOption(name=opt['name'], values=opt['values']))
-                                print(f"      ✅ 바텀시트에서 추출: {opt['name']}: {opt['values']}")
+                    final_values = expanded_values if expanded_values else group_data.get('values', [])
                     
-                    # 바텀시트 닫기
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(0.5)
+                    if final_values:
+                        options.append(ProductOption(name=group_name, values=final_values))
+                        print(f"         ✅ {group_name}: {final_values}")
+                        
+                        # 다음 옵션 그룹 활성화를 위해 첫 번째 옵션 선택
+                        if group_idx < total_groups and len(final_values) > 0:
+                            try:
+                                first_option = final_values[0]
+                                option_selector = f'text="{first_option}"'
+                                option_el = await page.query_selector(option_selector)
+                                if option_el and await option_el.is_visible():
+                                    await option_el.click()
+                                    await asyncio.sleep(0.5)
+                                    print(f"         → 다음 그룹 활성화를 위해 '{first_option}' 선택")
+                            except:
+                                pass
+            
+            # 5단계: 결과가 없으면 대체 방법 시도
+            if not options:
+                print("      ⚠️ 계층형 옵션 추출 실패, 단순 패널 추출 시도...")
+                options = await self._get_options_simple(page)
+            
+            # 6단계: 여전히 없으면 후기에서 추출
+            if not options:
+                print("      ⚠️ 패널 추출 실패, 후기에서 추출 시도...")
+                options = await self._get_options_from_reviews(page)
+            
+            # 패널 닫기
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
             
             print(f"   📌 옵션 추출 완료: {len(options)}개 그룹")
             for opt in options:
@@ -604,6 +580,141 @@ class IdusScraper:
             print(f"옵션 추출 오류: {e}")
             import traceback
             traceback.print_exc()
+        
+        return options
+    
+    async def _get_options_simple(self, page: Page) -> list[ProductOption]:
+        """단순 옵션 패널에서 추출 (계층형이 아닌 경우)"""
+        options = []
+        try:
+            panel_options = await page.evaluate("""
+                () => {
+                    const result = [];
+                    const optionGroups = {};
+                    
+                    // 옵션 패널 찾기
+                    const panels = document.querySelectorAll(
+                        '[role="dialog"], [role="listbox"], ' +
+                        '[class*="bottom-sheet"], [class*="bottomSheet"], ' +
+                        '[class*="option-panel"], [class*="optionPanel"], ' +
+                        '[class*="modal"], [class*="drawer"]'
+                    );
+                    
+                    for (const panel of panels) {
+                        const rect = panel.getBoundingClientRect();
+                        if (rect.width < 50 || rect.height < 50) continue;
+                        
+                        const allText = panel.innerText || '';
+                        const lines = allText.split('\\n');
+                        
+                        let currentGroup = null;
+                        
+                        for (const line of lines) {
+                            const trimmed = line.trim();
+                            if (!trimmed) continue;
+                            
+                            // 그룹 헤더 패턴: "1. 옵션명" 또는 "옵션명"
+                            const groupMatch = trimmed.match(/^(?:(\\d+)\\.\\s*)?(.+?)$/);
+                            if (groupMatch && trimmed.length <= 30 && !trimmed.includes('원')) {
+                                const potentialGroup = groupMatch[2].trim();
+                                if (potentialGroup.length >= 2 && 
+                                    !['선택해주세요', '확인', '취소', '닫기'].some(n => potentialGroup.includes(n))) {
+                                    currentGroup = potentialGroup;
+                                    if (!optionGroups[currentGroup]) {
+                                        optionGroups[currentGroup] = [];
+                                    }
+                                    continue;
+                                }
+                            }
+                            
+                            // 옵션값
+                            if (currentGroup && trimmed.length >= 1 && trimmed.length <= 60) {
+                                const noise = ['선택해', '확인', '취소', '닫기', '장바구니', '구매하기', '필수'];
+                                const isNoise = noise.some(n => trimmed.includes(n));
+                                const isPriceOnly = /^[\\d,]+\\s*원?$/.test(trimmed);
+                                
+                                if (!isNoise && !isPriceOnly && !/^\\d+\\./.test(trimmed)) {
+                                    let cleanValue = trimmed.replace(/\\s*\\(?[\\+\\-]?[\\d,]+\\s*원\\)?\\s*$/g, '').trim();
+                                    if (cleanValue.length >= 1 && !optionGroups[currentGroup].includes(cleanValue)) {
+                                        optionGroups[currentGroup].push(cleanValue);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    for (const [name, values] of Object.entries(optionGroups)) {
+                        if (values.length > 0) {
+                            result.push({ name, values: [...new Set(values)] });
+                        }
+                    }
+                    
+                    return result;
+                }
+            """)
+            
+            if panel_options:
+                for opt in panel_options:
+                    if opt.get('values') and len(opt['values']) > 0:
+                        options.append(ProductOption(name=opt['name'], values=opt['values']))
+                        
+        except Exception as e:
+            print(f"단순 옵션 추출 오류: {e}")
+        
+        return options
+    
+    async def _get_options_from_reviews(self, page: Page) -> list[ProductOption]:
+        """후기에서 옵션 정보 추출"""
+        options = []
+        try:
+            review_options = await page.evaluate("""
+                () => {
+                    const optionGroups = {};
+                    const allText = document.body.innerText || '';
+                    
+                    // 패턴: "옵션명: 옵션값" 또는 "옵션명 선택: 옵션값"
+                    const patterns = [
+                        /([가-힣a-zA-Z]+(?:\\s*선택)?)\\s*[：:]\\s*([가-힣a-zA-Z0-9\\s\\(\\)\\[\\]]+?)(?=\\s*\\*|\\s*[,\\n]|$)/g
+                    ];
+                    
+                    for (const pattern of patterns) {
+                        const matches = allText.matchAll(pattern);
+                        for (const match of matches) {
+                            let optName = match[1].trim();
+                            let optValue = match[2].trim().replace(/\\s+/g, ' ');
+                            
+                            // 유효성 검사
+                            if (optName && optValue &&
+                                optName.length >= 2 && optName.length <= 30 && 
+                                optValue.length >= 1 && optValue.length <= 80 &&
+                                !['구매', '배송', '결제', '가격'].some(n => optName.includes(n))) {
+                                
+                                if (!optionGroups[optName]) {
+                                    optionGroups[optName] = new Set();
+                                }
+                                optionGroups[optName].add(optValue);
+                            }
+                        }
+                    }
+                    
+                    const result = [];
+                    for (const [name, values] of Object.entries(optionGroups)) {
+                        if (values.size > 0) {
+                            result.push({ name, values: Array.from(values) });
+                        }
+                    }
+                    return result;
+                }
+            """)
+            
+            if review_options:
+                for opt in review_options:
+                    if opt.get('values') and len(opt['values']) > 0:
+                        options.append(ProductOption(name=opt['name'], values=opt['values']))
+                        print(f"      ✅ 후기에서 추출: {opt['name']}: {opt['values']}")
+                        
+        except Exception as e:
+            print(f"후기 옵션 추출 오류: {e}")
         
         return options
 
