@@ -9,7 +9,7 @@ git add -A
 
 echo.
 echo Committing...
-git commit -m "fix: improve option extraction and remove final tab"
+git commit -m "feat: Phase 1 improvements - prompts, OCR order, copy functions"
 
 echo.
 echo Pushing to origin...

@@ -31,10 +31,14 @@ class ProductOption(BaseModel):
 
 
 class ImageText(BaseModel):
-    """이미지 내 텍스트 모델"""
+    """이미지 내 텍스트 모델 (순서 정보 포함)"""
     image_url: str
     original_text: str  # 추출된 원본 한국어 텍스트
     translated_text: Optional[str] = None  # 번역된 텍스트
+    
+    # 순서 및 위치 정보 (OCR 결과 정렬용)
+    order_index: int = 0  # 페이지 내 순서 (0부터 시작)
+    y_position: float = 0.0  # Y좌표 (정렬 기준)
 
 
 class ProductData(BaseModel):

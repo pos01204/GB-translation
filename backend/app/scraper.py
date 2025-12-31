@@ -136,9 +136,10 @@ class IdusScraper:
             nuxt_images = self._extract_images_from_nuxt(html_content)
             print(f"   __NUXT__에서 추출: {len(nuxt_images)}개")
             
-            # 5. DOM에서 이미지 URL 추출
+            # 5. DOM에서 이미지 URL 추출 (위치 정보 포함)
             dom_images = await self._extract_images_from_dom(page)
-            print(f"   DOM에서 추출: {len(dom_images)}개")
+            dom_images_with_pos = await self._extract_images_with_position(page)
+            print(f"   DOM에서 추출: {len(dom_images)}개 (위치 정보: {len(dom_images_with_pos)}개)")
             
             print(f"   네트워크에서 캡처: {len(network_images)}개")
             
@@ -151,6 +152,10 @@ class IdusScraper:
             
             # 7. 필터링 및 정리
             filtered_images = self._filter_images(list(all_images))
+            
+            # 8. 위치 기반 정렬 적용 (DOM에서 추출한 순서 우선)
+            if dom_images_with_pos:
+                filtered_images = self._sort_images_by_position(filtered_images, dom_images_with_pos)
             
             print(f"✅ 크롤링 완료: {title}")
             print(f"   - 작가: {artist_name}")
@@ -509,7 +514,7 @@ class IdusScraper:
         return images
 
     async def _extract_images_from_dom(self, page: Page) -> list[str]:
-        """DOM에서 이미지 URL 추출"""
+        """DOM에서 이미지 URL 추출 (기본 - URL만)"""
         try:
             urls = await page.evaluate("""
                 () => {
@@ -562,6 +567,52 @@ class IdusScraper:
             return urls or []
         except Exception as e:
             print(f"DOM 이미지 추출 오류: {e}")
+            return []
+
+    async def _extract_images_with_position(self, page: Page) -> list[dict]:
+        """DOM에서 이미지 URL과 Y좌표 추출 (페이지 순서 보장)"""
+        try:
+            images = await page.evaluate("""
+                () => {
+                    const images = [];
+                    const seen = new Set();
+                    const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+                    
+                    // 모든 img 요소 수집
+                    document.querySelectorAll('img').forEach((img, domIndex) => {
+                        // URL 추출 (여러 속성에서)
+                        const url = img.src || img.getAttribute('data-src') || 
+                                   img.getAttribute('data-original') || img.getAttribute('data-lazy-src');
+                        
+                        if (!url || !url.includes('idus') || seen.has(url)) return;
+                        seen.add(url);
+                        
+                        // 위치 정보
+                        const rect = img.getBoundingClientRect();
+                        
+                        images.push({
+                            url: url,
+                            y_position: rect.top + scrollTop,  // 절대 Y좌표
+                            x_position: rect.left,
+                            width: rect.width,
+                            height: rect.height,
+                            dom_index: domIndex
+                        });
+                    });
+                    
+                    // Y좌표로 정렬 (같은 Y면 X좌표로)
+                    return images.sort((a, b) => {
+                        // 10px 이내 차이는 같은 행으로 간주
+                        if (Math.abs(a.y_position - b.y_position) < 10) {
+                            return a.x_position - b.x_position;
+                        }
+                        return a.y_position - b.y_position;
+                    });
+                }
+            """)
+            return images or []
+        except Exception as e:
+            print(f"위치 기반 이미지 추출 오류: {e}")
             return []
 
     def _filter_images(self, images: list[str]) -> list[str]:
@@ -638,21 +689,36 @@ class IdusScraper:
                 # Idus CDN이 아닌 다른 이미지
                 result.append(img)
         
-        # 상세 이미지 (텍스트가 있을 가능성이 높은) 우선 정렬
-        detail_keywords = ['detail', 'description', 'content', 'info', 'story']
-        prioritized = []
-        others = []
+        print(f"📷 이미지 필터링: {len(images)}개 → {len(result)}개")
+        return result[:200]  # 최대 200개
+    
+    def _sort_images_by_position(self, images: list[str], position_data: list[dict]) -> list[str]:
+        """위치 정보를 기반으로 이미지 정렬 (페이지 순서 보장)"""
         
-        for url in result:
-            if any(kw in url.lower() for kw in detail_keywords):
-                prioritized.append(url)
-            else:
-                others.append(url)
+        # 위치 데이터를 URL -> 순서 맵으로 변환
+        url_to_order = {}
+        for idx, pos_info in enumerate(position_data):
+            url = pos_info.get('url', '')
+            if url:
+                # URL 정규화 (쿼리 파라미터 제거 등)
+                base_url = url.split('?')[0]
+                url_to_order[base_url] = idx
+                url_to_order[url] = idx
         
-        final_result = prioritized + others
+        # 이미지를 순서대로 정렬
+        def get_order(url: str) -> int:
+            base_url = url.split('?')[0]
+            # 위치 정보가 있으면 해당 순서, 없으면 맨 뒤로
+            if url in url_to_order:
+                return url_to_order[url]
+            if base_url in url_to_order:
+                return url_to_order[base_url]
+            return 99999
         
-        print(f"📷 이미지 필터링: {len(images)}개 → {len(final_result)}개")
-        return final_result[:200]  # 최대 200개
+        sorted_images = sorted(images, key=get_order)
+        
+        print(f"📷 위치 기반 정렬: {len(sorted_images)}개 이미지 페이지 순서로 정렬됨")
+        return sorted_images
 
 
 if __name__ == "__main__":

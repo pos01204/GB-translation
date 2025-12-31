@@ -1,6 +1,7 @@
 """
 Google Gemini 기반 번역 및 OCR 모듈
 새로운 google-genai 라이브러리 사용 + Rate Limiting
+전문 프롬프트 템플릿 시스템 적용
 """
 import asyncio
 import base64
@@ -19,6 +20,16 @@ from .models import (
     ImageText,
     TranslatedProduct,
     TargetLanguage,
+)
+
+# 전문 번역 프롬프트 템플릿
+from .prompts import (
+    JAPANESE_PROMPT,
+    JAPANESE_TITLE_PROMPT,
+    JAPANESE_OPTION_PROMPT,
+    ENGLISH_PROMPT,
+    ENGLISH_TITLE_PROMPT,
+    ENGLISH_OPTION_PROMPT,
 )
 
 
@@ -125,6 +136,24 @@ class ProductTranslator:
             TargetLanguage.JAPANESE: "Japanese",
         }.get(lang, "English")
     
+    def _get_prompt(self, text: str, target_language: TargetLanguage, context: str = "") -> str:
+        """컨텍스트에 맞는 프롬프트 선택"""
+        
+        if target_language == TargetLanguage.JAPANESE:
+            if context == "title":
+                return JAPANESE_TITLE_PROMPT.format(text=text)
+            elif context == "option":
+                return JAPANESE_OPTION_PROMPT.format(text=text)
+            else:
+                return JAPANESE_PROMPT.format(text=text)
+        else:  # English
+            if context == "title":
+                return ENGLISH_TITLE_PROMPT.format(text=text)
+            elif context == "option":
+                return ENGLISH_OPTION_PROMPT.format(text=text)
+            else:
+                return ENGLISH_PROMPT.format(text=text)
+    
     async def translate_product(
         self,
         product_data: ProductData,
@@ -147,16 +176,16 @@ class ProductTranslator:
                 target_language=target_language
             )
         
-        # 1. 제목 번역
+        # 1. 제목 번역 (간결한 프롬프트 사용)
         print(f"📝 제목 번역: {product_data.title[:30]}...")
         translated_title = await self._translate_text_with_retry(
-            product_data.title, target_language, "상품명"
+            product_data.title, target_language, "title"
         )
         
-        # 2. 설명 번역
+        # 2. 설명 번역 (전문 프롬프트 사용)
         print(f"📝 설명 번역: {len(product_data.description)}자")
         translated_description = await self._translate_text_with_retry(
-            product_data.description, target_language, "상품 설명"
+            product_data.description, target_language, "description"
         )
         
         # 3. 옵션 번역
@@ -214,30 +243,38 @@ class ProductTranslator:
         return text
     
     def _translate_text(self, text: str, target_language: TargetLanguage, context: str = "") -> str:
-        """텍스트 번역 (단순 호출)"""
-        lang = self._get_language_name(target_language)
+        """텍스트 번역 (전문 프롬프트 사용)"""
         
-        prompt = f"""Translate this Korean text to {lang}. Output only the translation, nothing else.
-
-Korean: {text}
-
-{lang}:"""
-
+        # 컨텍스트에 맞는 프롬프트 선택
+        prompt = self._get_prompt(text, target_language, context)
+        
+        # 설명 번역은 더 긴 출력 허용
+        max_tokens = 8000 if context == "description" else 4000
+        
         response = self.client.models.generate_content(
             model=self._model_name,
             contents=prompt,
             config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=4000,
+                temperature=0.3,  # 약간 높여서 자연스러운 표현 유도
+                max_output_tokens=max_tokens,
             )
         )
         
         if response and response.text:
             result = response.text.strip()
-            for prefix in [f"{lang}:", "Translation:", "번역:"]:
+            
+            # 불필요한 프리픽스 제거
+            lang = self._get_language_name(target_language)
+            prefixes_to_remove = [
+                f"{lang}:", f"{lang} Translation:", "Translation:", 
+                "번역:", "Japanese:", "English:",
+                "Japanese Translation:", "English Translation:"
+            ]
+            for prefix in prefixes_to_remove:
                 if result.startswith(prefix):
                     result = result[len(prefix):].strip()
-            print(f"   ✅ 번역 성공")
+            
+            print(f"   ✅ 번역 성공 ({context})")
             return result
         
         return text
@@ -245,15 +282,19 @@ Korean: {text}
     async def _translate_options(
         self, options: list[ProductOption], target_language: TargetLanguage
     ) -> list[ProductOption]:
-        """옵션 번역"""
+        """옵션 번역 (간결한 프롬프트 사용)"""
         result = []
         for opt in options:
             try:
-                name = await self._translate_text_with_retry(opt.name, target_language, "옵션명")
+                # 옵션명 번역
+                name = await self._translate_text_with_retry(opt.name, target_language, "option")
+                
+                # 옵션값들 번역
                 values = []
                 for v in opt.values:
-                    translated_v = await self._translate_text_with_retry(v, target_language, "옵션값")
+                    translated_v = await self._translate_text_with_retry(v, target_language, "option")
                     values.append(translated_v)
+                    
                 result.append(ProductOption(name=name, values=values))
             except Exception as e:
                 print(f"   ❌ 옵션 번역 실패: {e}")
@@ -263,7 +304,7 @@ Korean: {text}
     async def _process_images(
         self, image_urls: list[str], target_language: TargetLanguage
     ) -> list[ImageText]:
-        """이미지 OCR (Rate Limit 적용)"""
+        """이미지 OCR (Rate Limit 적용, 순서 정보 포함)"""
         results = []
         
         for idx, url in enumerate(image_urls):
@@ -279,21 +320,28 @@ Korean: {text}
                 if ocr_text and len(ocr_text) > 10:
                     print(f"      ✅ 텍스트 발견: {len(ocr_text)}자")
                     
-                    # 번역
+                    # 번역 (OCR 텍스트는 일반 번역 프롬프트 사용)
                     translated = await self._translate_text_with_retry(
-                        ocr_text, target_language, "이미지 텍스트"
+                        ocr_text, target_language, "ocr"
                     )
                     
+                    # 순서 정보 포함하여 저장
                     results.append(ImageText(
                         image_url=url,
                         original_text=ocr_text,
-                        translated_text=translated
+                        translated_text=translated,
+                        order_index=idx,  # 페이지 순서 (이미 정렬된 상태)
+                        y_position=float(idx * 100)  # 상대적 위치 (정렬용)
                     ))
                 else:
                     print(f"      ⬜ 텍스트 없음")
                     
             except Exception as e:
                 print(f"      ❌ OCR 오류: {e}")
+        
+        # 순서대로 정렬된 결과 반환
+        results.sort(key=lambda x: x.order_index)
+        print(f"   📊 OCR 결과: {len(results)}개 (순서 정렬됨)")
         
         return results
     
@@ -356,4 +404,5 @@ Korean: {text}
             raise e
     
     async def translate_single_text(self, text: str, target_language: TargetLanguage) -> str:
-        return await self._translate_text_with_retry(text, target_language, "텍스트")
+        """단일 텍스트 번역 (외부 API용)"""
+        return await self._translate_text_with_retry(text, target_language, "description")

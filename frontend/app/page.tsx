@@ -1,8 +1,15 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { RefreshCw, Download, AlertCircle } from 'lucide-react'
+import { RefreshCw, Download, AlertCircle, Copy, ClipboardCopy, FileText, ChevronDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toaster'
@@ -23,6 +30,17 @@ import {
   type TranslatedProduct,
 } from '@/lib/api'
 import { getLanguageDisplayName } from '@/lib/utils'
+import {
+  formatStructuredText,
+  formatIdusGlobal,
+  formatTitleOnly,
+  formatDescriptionOnly,
+  formatOptionsOnly,
+  formatOcrOnly,
+  copyToClipboard,
+  downloadTxt,
+  downloadJson,
+} from '@/lib/formatters'
 
 type AppStatus = 'idle' | 'scraping' | 'translating' | 'completed' | 'error'
 
@@ -97,35 +115,85 @@ export default function Home() {
     setTranslatedData(null)
   }, [])
 
-  // 결과 다운로드 (JSON)
-  const handleDownload = useCallback(() => {
+  // 전체 복사
+  const handleCopyAll = useCallback(async () => {
     if (!translatedData) return
-
-    const exportData = {
-      original: translatedData.original,
-      translated: {
-        title: translatedData.translated_title,
-        description: translatedData.translated_description,
-        options: translatedData.translated_options,
-        image_texts: translatedData.translated_image_texts,
-      },
-      target_language: translatedData.target_language,
-      exported_at: new Date().toISOString(),
+    const text = formatStructuredText(translatedData)
+    const success = await copyToClipboard(text)
+    if (success) {
+      toast({ title: '복사 완료', description: '전체 번역 결과가 클립보드에 복사되었습니다.' })
     }
-
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `idus-translation-${Date.now()}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-
-    toast({
-      title: '다운로드 완료',
-      description: 'JSON 파일이 다운로드되었습니다.',
-    })
   }, [translatedData])
+
+  // 아이디어스 형식 복사
+  const handleCopyIdusFormat = useCallback(async () => {
+    if (!translatedData) return
+    const text = formatIdusGlobal(translatedData)
+    const success = await copyToClipboard(text)
+    if (success) {
+      toast({ title: '복사 완료', description: '아이디어스 글로벌 형식으로 복사되었습니다.' })
+    }
+  }, [translatedData])
+
+  // 제목만 복사
+  const handleCopyTitle = useCallback(async () => {
+    if (!translatedData) return
+    const success = await copyToClipboard(formatTitleOnly(translatedData))
+    if (success) {
+      toast({ title: '복사 완료', description: '제목이 복사되었습니다.' })
+    }
+  }, [translatedData])
+
+  // 설명만 복사
+  const handleCopyDescription = useCallback(async () => {
+    if (!translatedData) return
+    const success = await copyToClipboard(formatDescriptionOnly(translatedData))
+    if (success) {
+      toast({ title: '복사 완료', description: '설명이 복사되었습니다.' })
+    }
+  }, [translatedData])
+
+  // 옵션만 복사
+  const handleCopyOptions = useCallback(async () => {
+    if (!translatedData) return
+    const text = formatOptionsOnly(translatedData)
+    if (!text) {
+      toast({ title: '알림', description: '옵션 정보가 없습니다.' })
+      return
+    }
+    const success = await copyToClipboard(text)
+    if (success) {
+      toast({ title: '복사 완료', description: '옵션이 복사되었습니다.' })
+    }
+  }, [translatedData])
+
+  // OCR만 복사
+  const handleCopyOcr = useCallback(async () => {
+    if (!translatedData) return
+    const text = formatOcrOnly(translatedData)
+    if (!text) {
+      toast({ title: '알림', description: 'OCR 결과가 없습니다.' })
+      return
+    }
+    const success = await copyToClipboard(text)
+    if (success) {
+      toast({ title: '복사 완료', description: 'OCR 결과가 복사되었습니다.' })
+    }
+  }, [translatedData])
+
+  // TXT 다운로드
+  const handleDownloadTxt = useCallback(() => {
+    if (!translatedData) return
+    downloadTxt(translatedData)
+    toast({ title: '다운로드 완료', description: 'TXT 파일이 다운로드되었습니다.' })
+  }, [translatedData])
+
+  // JSON 다운로드
+  const handleDownloadJson = useCallback(() => {
+    if (!translatedData || !originalData) return
+    downloadJson(translatedData, originalData)
+    toast({ title: '다운로드 완료', description: 'JSON 파일이 다운로드되었습니다.' })
+  }, [translatedData, originalData])
 
   // 번역 텍스트 수정 핸들러
   const handleEditTitle = useCallback((newTitle: string) => {
@@ -204,10 +272,61 @@ export default function Home() {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={handleDownload}>
-                <Download className="w-4 h-4 mr-2" />
-                JSON 다운로드
+              {/* 빠른 복사 버튼 */}
+              <Button variant="default" onClick={handleCopyAll}>
+                <Copy className="w-4 h-4 mr-2" />
+                전체 복사
               </Button>
+              
+              {/* 복사 옵션 드롭다운 */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline">
+                    <ClipboardCopy className="w-4 h-4 mr-2" />
+                    복사 옵션
+                    <ChevronDown className="w-4 h-4 ml-2" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuItem onClick={handleCopyIdusFormat}>
+                    <FileText className="w-4 h-4 mr-2" />
+                    아이디어스 글로벌 형식
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={handleCopyTitle}>
+                    📌 제목만 복사
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleCopyDescription}>
+                    📝 설명만 복사
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleCopyOptions}>
+                    🏷️ 옵션만 복사
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleCopyOcr}>
+                    🖼️ OCR 결과만 복사
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              
+              {/* 다운로드 드롭다운 */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline">
+                    <Download className="w-4 h-4 mr-2" />
+                    다운로드
+                    <ChevronDown className="w-4 h-4 ml-2" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={handleDownloadTxt}>
+                    📄 TXT 파일
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleDownloadJson}>
+                    📦 JSON 파일
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              
               <Button variant="outline" onClick={handleReset}>
                 <RefreshCw className="w-4 h-4 mr-2" />
                 새 번역

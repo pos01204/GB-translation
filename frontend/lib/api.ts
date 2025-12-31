@@ -42,6 +42,8 @@ export interface ImageText {
   image_url: string
   original_text: string
   translated_text: string | null
+  order_index?: number  // 페이지 내 순서
+  y_position?: number   // Y좌표 (정렬용)
 }
 
 export interface ProductData {
