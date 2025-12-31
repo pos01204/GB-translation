@@ -754,122 +754,104 @@ class IdusScraper:
             return []
 
     async def _extract_images_with_position(self, page: Page) -> list[dict]:
-        """상세페이지(작품정보 탭) 영역 내 이미지만 추출 (Y좌표 순서 보장)"""
+        """상세페이지(작품정보 탭) 영역 내 이미지만 추출 - DOM 경로 기반 필터링"""
         try:
+            # 1단계: 작품정보 탭 클릭하여 해당 콘텐츠 활성화
+            print("   📌 작품정보 탭 클릭 시도...")
+            try:
+                tab_clicked = await page.evaluate("""
+                    () => {
+                        // 작품정보 탭 찾기
+                        const tabs = document.querySelectorAll('[role="tab"], button, a');
+                        for (const tab of tabs) {
+                            const text = (tab.innerText || tab.textContent || '').trim();
+                            if (text.includes('작품정보') || text === '작품정보') {
+                                tab.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                if tab_clicked:
+                    await asyncio.sleep(0.5)
+                    print("      ✅ 작품정보 탭 클릭됨")
+            except:
+                pass
+            
+            # 2단계: DOM 경로 기반 이미지 추출
             images = await page.evaluate("""
                 () => {
                     const images = [];
                     const seen = new Set();
                     const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
                     
-                    // ===== 1단계: 탭 구조 분석 =====
-                    // 아이디어스는 "작품정보", "후기", "댓글", "추천" 탭 구조
-                    let tabHeaderY = null;  // 탭 헤더(버튼들)의 Y 위치
-                    let reviewTabY = null;  // "후기" 탭 콘텐츠 시작 Y
-                    let detailAreaMinY = 0;
-                    let detailAreaMaxY = Infinity;
+                    // ===== 제외할 부모 클래스 패턴 (정확한 매칭) =====
+                    const excludePatterns = [
+                        // 후기/리뷰 영역
+                        'review', 'photo-review', 'photoReview', '후기',
+                        // 댓글 영역
+                        'comment', '댓글',
+                        // 추천/관련 상품 (가장 중요!)
+                        'recommend', 'related', 'similar', '추천', 'other-product',
+                        'also-like', 'you-may-like', 'more-product',
+                        // 작가/샵 다른 상품
+                        'artist-product', 'shop-product', 'seller-product',
+                        'artist-other', 'shop-other', 'more-from',
+                        // 헤더/푸터/네비게이션
+                        'header', 'footer', 'nav', 'gnb', 'lnb',
+                        // 배너/팝업
+                        'banner', 'popup', 'modal', 'toast', 'alert',
+                        // 장바구니/구매 영역
+                        'cart', 'purchase', 'buy-area', 'order',
+                        // 썸네일 슬라이더 (상단 메인 이미지 영역)
+                        'thumbnail', 'thumb-list', 'thumbList', 'slider-thumb',
+                        // 프로필/아바타
+                        'profile', 'avatar', 'user-info'
+                    ];
                     
-                    // 탭 버튼들 찾기 (tablist)
-                    const tabLists = document.querySelectorAll('[role="tablist"], [class*="tab-list"], [class*="tabList"]');
-                    for (const tabList of tabLists) {
-                        const tabs = tabList.querySelectorAll('[role="tab"], button, a');
-                        let hasProductInfoTab = false;
-                        let hasReviewTab = false;
-                        
-                        tabs.forEach(tab => {
-                            const text = (tab.innerText || tab.textContent || '').trim();
-                            if (text.includes('작품정보') || text.includes('상품정보') || text.includes('상세')) {
-                                hasProductInfoTab = true;
+                    // ===== 포함할 부모 클래스 패턴 =====
+                    const includePatterns = [
+                        'detail-content', 'detailContent',
+                        'product-detail', 'productDetail',
+                        'product-info', 'productInfo',
+                        'description', 'desc-area',
+                        'content-area', 'contentArea',
+                        'detail-area', 'detailArea',
+                        'article', 'main-content'
+                    ];
+                    
+                    // ===== "작품 정보 접기/더보기" 버튼 위치 찾기 =====
+                    let detailEndY = Infinity;
+                    const foldButtons = document.querySelectorAll('button');
+                    for (const btn of foldButtons) {
+                        const text = (btn.innerText || '').trim();
+                        if (text.includes('작품 정보 접기') || text.includes('작품 정보 더보기')) {
+                            const rect = btn.getBoundingClientRect();
+                            // 접기 버튼 아래는 상세페이지가 아님
+                            if (text.includes('접기')) {
+                                detailEndY = rect.bottom + scrollTop + 50;
                             }
-                            if (text.includes('후기') || text.includes('리뷰')) {
-                                hasReviewTab = true;
-                            }
-                        });
-                        
-                        // 작품정보와 후기 탭이 있는 탭리스트 발견
-                        if (hasProductInfoTab && hasReviewTab) {
-                            const rect = tabList.getBoundingClientRect();
-                            tabHeaderY = rect.bottom + scrollTop;  // 탭 헤더 아래부터가 콘텐츠 영역
-                            console.log('탭 헤더 발견, Y:', tabHeaderY);
                             break;
                         }
                     }
                     
-                    // ===== 2단계: 상세페이지 영역 범위 결정 =====
-                    // "작품 정보 더보기" 버튼 또는 그 주변 영역 찾기
-                    const moreInfoBtn = document.querySelector('button:has-text("작품 정보 더보기"), [class*="more-info"], [class*="moreInfo"]');
-                    if (moreInfoBtn) {
-                        const rect = moreInfoBtn.getBoundingClientRect();
-                        // 더보기 버튼 위쪽이 상세 이미지 영역
-                        detailAreaMaxY = rect.top + scrollTop + 100; // 약간의 여유
-                        console.log('더보기 버튼 발견, MaxY:', detailAreaMaxY);
-                    }
-                    
-                    // 후기/댓글/추천 영역 찾기 (상세페이지 영역 끝)
-                    const sectionSelectors = [
-                        '[class*="review-section"]', '[class*="reviewSection"]',
-                        '[class*="comment-section"]', '[class*="commentSection"]',
-                        '[class*="recommend"]', '[class*="related"]', '[class*="similar"]'
-                    ];
-                    
-                    for (const sel of sectionSelectors) {
-                        const el = document.querySelector(sel);
-                        if (el) {
+                    // ===== 후기 섹션 시작 위치 찾기 =====
+                    const reviewHeaders = document.querySelectorAll('*');
+                    for (const el of reviewHeaders) {
+                        const text = (el.innerText || '').trim();
+                        // "후기(숫자)" 패턴 찾기
+                        if (/^후기\\s*\\(\\d+\\)/.test(text) || /^후기\\d*$/.test(text)) {
                             const rect = el.getBoundingClientRect();
-                            const sectionY = rect.top + scrollTop;
-                            if (sectionY > (tabHeaderY || 0) && sectionY < detailAreaMaxY) {
-                                detailAreaMaxY = sectionY;
-                                console.log('섹션 발견:', sel, 'MaxY:', detailAreaMaxY);
+                            const y = rect.top + scrollTop;
+                            if (y > 500 && y < detailEndY) {
+                                detailEndY = y - 20;
+                                break;
                             }
                         }
                     }
                     
-                    // 탭 헤더가 있으면 그 아래부터 시작
-                    if (tabHeaderY) {
-                        detailAreaMinY = tabHeaderY;
-                    } else {
-                        // 탭을 찾지 못한 경우, 상단 영역(헤더, 메인이미지) 제외
-                        const viewportHeight = window.innerHeight;
-                        detailAreaMinY = viewportHeight * 0.4;
-                    }
-                    
-                    console.log('상세페이지 영역 범위:', detailAreaMinY, '-', detailAreaMaxY);
-                    
-                    // ===== 3단계: 명확한 제외 영역 =====
-                    const excludeSelectors = [
-                        // 헤더/네비게이션
-                        'header', 'nav', '[class*="header"]', '[class*="nav"]',
-                        // 푸터
-                        'footer', '[class*="footer"]',
-                        // 후기/리뷰 영역 (이미지 포함됨)
-                        '[class*="review"]', '[class*="후기"]',
-                        // 댓글 영역
-                        '[class*="comment"]', '[class*="댓글"]',
-                        // 추천/관련 상품
-                        '[class*="recommend"]', '[class*="related"]', '[class*="similar"]', '[class*="추천"]',
-                        // 배너/팝업
-                        '[class*="banner"]', '[class*="popup"]', '[class*="modal"]',
-                        // 작가/샵 정보
-                        '[class*="artist"]', '[class*="shop"]', '[class*="seller"]',
-                        // 구매 정보
-                        '[class*="purchase"]', '[class*="buy"]', '[class*="cart"]'
-                    ];
-                    
-                    const excludeRects = [];
-                    for (const sel of excludeSelectors) {
-                        document.querySelectorAll(sel).forEach(el => {
-                            const rect = el.getBoundingClientRect();
-                            // 크기가 충분한 영역만 제외 대상으로
-                            if (rect.height > 50) {
-                                excludeRects.push({
-                                    top: rect.top + scrollTop,
-                                    bottom: rect.bottom + scrollTop
-                                });
-                            }
-                        });
-                    }
-                    
-                    // ===== 4단계: 이미지 수집 =====
+                    // ===== 이미지 수집 =====
                     document.querySelectorAll('img').forEach((img, domIndex) => {
                         // URL 추출
                         const url = img.src || img.getAttribute('data-src') || 
@@ -877,52 +859,75 @@ class IdusScraper:
                         
                         if (!url || !url.includes('idus') || seen.has(url)) return;
                         
-                        // 이미지 크기 및 위치
-                        const rect = img.getBoundingClientRect();
-                        const imgY = rect.top + scrollTop;
-                        const imgX = rect.left;
-                        
-                        // 너무 작은 이미지 제외 (아이콘, 썸네일 등)
-                        if (rect.width < 150 || rect.height < 150) return;
-                        
-                        // 상세페이지 영역 범위 체크
-                        if (imgY < detailAreaMinY - 50 || imgY > detailAreaMaxY + 50) return;
-                        
-                        // 제외 영역 체크
-                        let inExcluded = false;
-                        for (const exRect of excludeRects) {
-                            // 이미지의 중심이 제외 영역 안에 있는지 확인
-                            const imgCenterY = imgY + rect.height / 2;
-                            if (imgCenterY >= exRect.top && imgCenterY <= exRect.bottom) {
-                                inExcluded = true;
-                                break;
-                            }
-                        }
-                        if (inExcluded) return;
-                        
-                        // URL 파일 경로로 제외 (프로필, 아이콘 등)
+                        // URL 패턴으로 제외
                         const urlLower = url.toLowerCase();
                         if (urlLower.includes('/profile') || urlLower.includes('/avatar') ||
                             urlLower.includes('/icon') || urlLower.includes('/badge') ||
-                            urlLower.includes('/review') || urlLower.includes('/thumb_') ||
+                            urlLower.includes('/thumb_') || urlLower.includes('/thumbnail') ||
                             urlLower.includes('_50.') || urlLower.includes('_100.') ||
-                            urlLower.includes('_150.') || urlLower.includes('_200.')) {
+                            urlLower.includes('_150.') || urlLower.includes('_200.') ||
+                            urlLower.includes('_250.')) {
                             return;
                         }
+                        
+                        // 이미지 크기 체크
+                        const rect = img.getBoundingClientRect();
+                        if (rect.width < 280 || rect.height < 200) return;
+                        
+                        // Y 위치 체크 (상세페이지 영역 내)
+                        const imgY = rect.top + scrollTop;
+                        if (imgY > detailEndY) return;
+                        
+                        // ===== DOM 경로 추적하여 제외 영역 체크 =====
+                        let el = img.parentElement;
+                        let inExcludedArea = false;
+                        let inIncludedArea = false;
+                        let depth = 0;
+                        const maxDepth = 15;
+                        
+                        while (el && el !== document.body && depth < maxDepth) {
+                            const classes = (el.className || '').toLowerCase();
+                            const id = (el.id || '').toLowerCase();
+                            const combined = classes + ' ' + id;
+                            
+                            // 제외 영역 체크
+                            for (const pattern of excludePatterns) {
+                                if (combined.includes(pattern)) {
+                                    inExcludedArea = true;
+                                    break;
+                                }
+                            }
+                            if (inExcludedArea) break;
+                            
+                            // 포함 영역 체크
+                            for (const pattern of includePatterns) {
+                                if (combined.includes(pattern)) {
+                                    inIncludedArea = true;
+                                    break;
+                                }
+                            }
+                            
+                            el = el.parentElement;
+                            depth++;
+                        }
+                        
+                        // 제외 영역에 있으면 건너뛰기
+                        if (inExcludedArea) return;
                         
                         seen.add(url);
                         
                         images.push({
                             url: url,
                             y_position: imgY,
-                            x_position: imgX,
+                            x_position: rect.left,
                             width: rect.width,
                             height: rect.height,
-                            dom_index: domIndex
+                            dom_index: domIndex,
+                            in_detail_area: inIncludedArea
                         });
                     });
                     
-                    // Y좌표로 정렬 (같은 Y면 X로 정렬)
+                    // Y좌표로 정렬
                     return images.sort((a, b) => {
                         if (Math.abs(a.y_position - b.y_position) < 20) {
                             return a.x_position - b.x_position;
@@ -932,12 +937,15 @@ class IdusScraper:
                 }
             """)
             
-            print(f"   📷 상세페이지 영역 이미지: {len(images)}개")
+            print(f"   📷 DOM 경로 기반 이미지 추출: {len(images)}개")
             if images:
-                print(f"      Y 범위: {images[0].get('y_position', 0):.0f} ~ {images[-1].get('y_position', 0):.0f}")
+                in_detail = sum(1 for img in images if img.get('in_detail_area'))
+                print(f"      상세영역 내: {in_detail}개, Y 범위: {images[0].get('y_position', 0):.0f} ~ {images[-1].get('y_position', 0):.0f}")
             return images or []
         except Exception as e:
             print(f"위치 기반 이미지 추출 오류: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def _filter_images(self, images: list[str]) -> list[str]:

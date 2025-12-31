@@ -2,7 +2,7 @@
 chcp 65001 > nul
 echo ========================================
 echo    Idus Translator Deploy Script
-echo    Fix: Option Button Click Priority
+echo    Fix: DOM Path Based Image Filtering
 echo ========================================
 echo.
 
@@ -17,7 +17,7 @@ git add -A
 
 echo.
 echo [3/4] Creating commit...
-git commit -m "Fix: Option extraction - click option button first, review fallback"
+git commit -m "Fix: DOM path based image filtering - exclude recommend/review areas"
 
 echo.
 echo [4/4] Pushing to remote...
@@ -31,15 +31,14 @@ echo.
 echo Frontend (Vercel): https://gb-translation.vercel.app
 echo Backend (Railway): Auto-deploy triggered
 echo.
-echo Option Extraction Priority:
-echo   1. Click "option select" button (most accurate)
-echo   2. Extract from reviews (fallback)
-echo   3. Click "buy" button bottom sheet (fallback)
-echo.
-echo Image Area Filtering:
-echo   - Tab structure based detection
-echo   - Product info tab content only
-echo   - Y-coordinate based sorting
-echo   - Minimum size filter (150px)
+echo Image Filtering Improvements:
+echo   1. DOM path based exclusion:
+echo      - recommend, related, similar
+echo      - review, comment
+echo      - artist-product, shop-product
+echo   2. Click "product info" tab first
+echo   3. Find "fold/more info" button position
+echo   4. Find "review(N)" section position
+echo   5. Minimum size filter (280x200px)
 echo.
 pause
