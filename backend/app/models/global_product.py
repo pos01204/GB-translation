@@ -6,11 +6,12 @@ from typing import Optional
 
 
 class ImageText(BaseModel):
-    """이미지 내 텍스트 OCR + 번역 결과"""
+    """이미지 내 텍스트 OCR + 번역 + 번역 이미지 생성 결과"""
     image_url: str
-    original_text: str = ""        # 추출된 한국어 텍스트
-    translated_text: str = ""      # 번역된 텍스트
-    order_index: int = 0           # 이미지 순서
+    original_text: str = ""              # 추출된 한국어 텍스트
+    translated_text: str = ""            # 번역된 텍스트
+    order_index: int = 0                 # 이미지 순서
+    translated_image_base64: Optional[str] = None  # 번역된 이미지 (base64)
 
 
 class LanguageData(BaseModel):

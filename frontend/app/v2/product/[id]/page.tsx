@@ -598,40 +598,57 @@ export default function ProductDetailPage() {
               : globalData.ja?.image_texts
             if (!imageTexts || imageTexts.length === 0) return null
             return (
-              <Section title="이미지 내 텍스트" icon={ImageIcon} defaultOpen={false}>
-                <div className="space-y-3">
+              <Section title={`이미지 내 텍스트 (${imageTexts.length}개)`} icon={ImageIcon} defaultOpen={true}>
+                <div className="space-y-4">
                   {imageTexts.map((item: ImageText, i: number) => (
-                    <div key={i} className="flex gap-3 items-start">
-                      <div className="w-12 h-12 rounded border overflow-hidden shrink-0 bg-gray-100">
-                        <img
-                          src={item.image_url}
-                          alt={`이미지 ${item.order_index}`}
-                          className="w-full h-full object-cover"
-                        />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        {item.original_text ? (
-                          <>
-                            <p className="text-xs text-gray-400 mb-1 truncate">{item.original_text}</p>
-                            <textarea
-                              value={item.translated_text}
-                              onChange={(e) => {
-                                if (!globalData[activeLang]) return
-                                const updatedTexts = [...(globalData[activeLang]!.image_texts)]
-                                updatedTexts[i] = { ...updatedTexts[i], translated_text: e.target.value }
-                                updateLangData(activeLang, {
-                                  ...globalData[activeLang]!,
-                                  image_texts: updatedTexts,
-                                })
-                              }}
-                              rows={1}
-                              className="w-full px-2 py-1 border rounded text-xs focus:ring-1 focus:ring-orange-500 outline-none resize-y"
+                    <div key={i} className="border rounded-lg p-3 bg-white">
+                      {/* 이미지 비교: 원본 ↔ 번역 */}
+                      <div className="flex gap-3 mb-2">
+                        <div className="flex-1">
+                          <p className="text-[10px] text-gray-400 mb-1">원본</p>
+                          <div className="rounded border overflow-hidden bg-gray-100 aspect-video">
+                            <img
+                              src={item.image_url}
+                              alt={`원본 ${item.order_index + 1}`}
+                              className="w-full h-full object-contain"
                             />
-                          </>
-                        ) : (
-                          <p className="text-xs text-gray-400">(텍스트 없음)</p>
+                          </div>
+                        </div>
+                        {item.translated_image_base64 && (
+                          <div className="flex-1">
+                            <p className="text-[10px] text-orange-500 mb-1">번역</p>
+                            <div className="rounded border border-orange-200 overflow-hidden bg-gray-100 aspect-video">
+                              <img
+                                src={`data:image/png;base64,${item.translated_image_base64}`}
+                                alt={`번역 ${item.order_index + 1}`}
+                                className="w-full h-full object-contain"
+                              />
+                            </div>
+                          </div>
                         )}
                       </div>
+                      {/* 텍스트 */}
+                      {item.original_text ? (
+                        <div className="space-y-1">
+                          <p className="text-xs text-gray-400 line-clamp-2">{item.original_text}</p>
+                          <textarea
+                            value={item.translated_text}
+                            onChange={(e) => {
+                              if (!globalData[activeLang]) return
+                              const updatedTexts = [...(globalData[activeLang]!.image_texts)]
+                              updatedTexts[i] = { ...updatedTexts[i], translated_text: e.target.value }
+                              updateLangData(activeLang, {
+                                ...globalData[activeLang]!,
+                                image_texts: updatedTexts,
+                              })
+                            }}
+                            rows={2}
+                            className="w-full px-2 py-1 border rounded text-xs focus:ring-1 focus:ring-orange-500 outline-none resize-y"
+                          />
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-400">(텍스트 없음)</p>
+                      )}
                     </div>
                   ))}
                 </div>

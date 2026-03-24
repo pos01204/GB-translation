@@ -139,18 +139,23 @@ class GBProductTranslator:
             )
             logger.info(f"옵션 번역 완료: {len(global_options)}개")
 
-        # 5. 이미지 OCR + 번역
+        # 5. 이미지 OCR (1회만) + 언어별 번역 + 이미지 생성
         if domestic.detail_images:
+            # OCR은 한국어 추출이므로 1회만 실행 (EN/JA 중복 제거)
+            ocr_results = await self._ocr_all_images(domestic.detail_images)
+            logger.info(f"이미지 OCR 완료: {len(ocr_results)}개 텍스트 발견")
+
+            # 각 언어별로 OCR 텍스트를 번역 + 이미지 생성
             for lang in target_languages:
-                image_texts = await self._translate_image_texts(
-                    domestic.detail_images, lang,
+                image_texts = await self._translate_and_generate_images(
+                    ocr_results, lang,
                 )
                 if lang == "en" and en_data:
                     en_data.image_texts = image_texts
                 elif lang == "ja" and ja_data:
                     ja_data.image_texts = image_texts
                 logger.info(
-                    f"이미지 OCR 완료 ({lang}): {len(image_texts)}개"
+                    f"이미지 번역+생성 완료 ({lang}): {len(image_texts)}개"
                 )
 
         result = GlobalProductData(
@@ -392,116 +397,216 @@ class GBProductTranslator:
                 return translated[:len(values)]
         return values
 
-    # ──────────────── Private: 이미지 OCR + 번역 ────────────────
+    # ──────────────── Private: 이미지 OCR + 번역 + 생성 ────────────────
 
-    async def _translate_image_texts(
-        self,
-        images: list,  # list of ProductImage from domestic.detail_images
-        language: str,  # "en" or "ja"
-    ) -> list[ImageText]:
-        """
-        이미지 OCR (한국어 텍스트 추출) + 번역
+    @staticmethod
+    def _get_high_res_url(url: str) -> str:
+        """이미지 URL을 고해상도(_1000)로 변환"""
+        if not url:
+            return url
+        # 이미 접미사가 있으면 교체, 없으면 추가
+        import re
+        base = re.sub(r'_\d+\.(jpg|jpeg|png|webp|gif)$', r'.\1', url)
+        # 확장자 앞에 _1000 삽입
+        return re.sub(r'\.(jpg|jpeg|png|webp|gif)$', r'_1000.\1', base)
 
-        기존 ProductTranslator의 Gemini Vision API를 활용하여
-        이미지에서 한국어 텍스트를 추출하고 대상 언어로 번역합니다.
+    async def _download_image(self, url: str) -> tuple[Optional[bytes], str]:
+        """이미지 다운로드 + MIME 타입 반환"""
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    return None, ""
+                ct = resp.headers.get("content-type", "").lower()
+                mime = "image/jpeg"
+                if "png" in ct:
+                    mime = "image/png"
+                elif "webp" in ct:
+                    mime = "image/webp"
+                elif "gif" in ct:
+                    mime = "image/gif"
+                return resp.content, mime
+        except Exception as e:
+            logger.warning(f"이미지 다운로드 실패: {e}")
+            return None, ""
+
+    async def _ocr_all_images(
+        self, images: list,
+    ) -> list[dict]:
+        """모든 이미지에서 한국어 텍스트를 1회만 추출 (언어 무관)
+
+        Returns:
+            [{"image_url": str, "original_text": str, "order_index": int,
+              "image_data": bytes, "mime": str}, ...]
         """
         MAX_OCR_IMAGES = int(os.getenv("MAX_OCR_IMAGES", "10"))
-        results: list[ImageText] = []
+        results = []
 
         target_images = images[:MAX_OCR_IMAGES]
-        logger.info(
-            f"이미지 OCR 시작 ({language}): "
-            f"{len(images)}개 중 {len(target_images)}개 처리"
-        )
+        logger.info(f"이미지 OCR 시작: {len(target_images)}개 처리")
 
         for idx, img in enumerate(target_images):
-            image_url = img.url
-            try:
-                logger.debug(f"  [{idx+1}/{len(target_images)}] OCR: {image_url[:60]}...")
+            raw_url = img.url
+            high_res_url = self._get_high_res_url(raw_url)
 
-                # Rate Limit 대기
+            try:
                 await self.translator._wait_for_rate_limit()
 
-                # Gemini Vision OCR: 이미지에서 한국어 텍스트 추출
-                ocr_text = await self._ocr_image(image_url)
+                # 고해상도 이미지 다운로드
+                image_data, mime = await self._download_image(high_res_url)
+                if not image_data:
+                    # 고해상도 실패 시 원본 URL 시도
+                    image_data, mime = await self._download_image(raw_url)
+                if not image_data:
+                    continue
 
-                if ocr_text and len(ocr_text) > 5:
-                    logger.debug(f"    텍스트 발견: {len(ocr_text)}자")
+                from google.genai import types
 
-                    # 추출된 한국어 텍스트를 대상 언어로 번역
-                    translated = await self._translate_single_text(ocr_text, language)
+                image_part = types.Part.from_bytes(
+                    data=image_data, mime_type=mime,
+                )
 
-                    results.append(ImageText(
-                        image_url=image_url,
-                        original_text=ocr_text,
-                        translated_text=translated,
-                        order_index=idx,
-                    ))
+                # 개선된 OCR 프롬프트
+                response = self.translator.client.models.generate_content(
+                    model=self.translator._model_name,
+                    contents=[
+                        "이 이미지를 분석하세요.\n"
+                        "1. 이미지에 포함된 모든 한국어 텍스트를 추출하세요.\n"
+                        "2. 영어 텍스트도 있다면 함께 추출하세요.\n"
+                        "3. 텍스트가 전혀 없으면 NO_TEXT만 응답하세요.\n\n"
+                        "추출된 텍스트만 줄바꿈으로 구분하여 응답하세요. "
+                        "설명이나 부가 정보는 필요 없습니다.",
+                        image_part,
+                    ],
+                )
+
+                if response and response.text:
+                    text = response.text.strip()
+                    if text != "NO_TEXT" and len(text) >= 3:
+                        logger.info(f"  [{idx+1}] OCR 텍스트: {text[:50]}...")
+                        results.append({
+                            "image_url": raw_url,
+                            "original_text": text,
+                            "order_index": idx,
+                            "image_data": image_data,
+                            "mime": mime,
+                        })
+                    else:
+                        logger.debug(f"  [{idx+1}] 텍스트 없음")
                 else:
-                    logger.debug(f"    텍스트 없음")
+                    logger.debug(f"  [{idx+1}] OCR 응답 없음")
 
             except Exception as e:
-                logger.warning(f"    OCR 오류 [{idx+1}]: {e}")
+                error_str = str(e)
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    logger.warning(f"  [{idx+1}] Rate limit, 12초 대기 후 스킵")
+                    await asyncio.sleep(12)
+                else:
+                    logger.warning(f"  [{idx+1}] OCR 오류: {e}")
 
-        # 순서대로 정렬
-        results.sort(key=lambda x: x.order_index)
-        logger.info(f"이미지 OCR 결과 ({language}): {len(results)}개")
+        logger.info(f"OCR 완료: {len(results)}/{len(target_images)}개 텍스트 발견")
         return results
 
-    async def _ocr_image(self, image_url: str) -> Optional[str]:
-        """Gemini Vision을 사용하여 이미지에서 한국어 텍스트 추출"""
-        if not self.translator._initialized or not self.translator.client:
-            return None
+    async def _translate_and_generate_images(
+        self,
+        ocr_results: list[dict],
+        language: str,
+    ) -> list[ImageText]:
+        """OCR 결과를 번역하고 번역된 이미지를 생성"""
+        import base64
+
+        results: list[ImageText] = []
+
+        for item in ocr_results:
+            try:
+                # 텍스트 번역
+                translated = await self._translate_single_text(
+                    item["original_text"], language,
+                )
+
+                # 번역된 이미지 생성 시도
+                translated_img_b64 = None
+                try:
+                    translated_img_b64 = await self._generate_translated_image(
+                        image_data=item["image_data"],
+                        mime=item["mime"],
+                        ocr_text=item["original_text"],
+                        translated_text=translated,
+                        language=language,
+                    )
+                except Exception as e:
+                    logger.warning(f"이미지 생성 실패 (텍스트만 사용): {e}")
+
+                results.append(ImageText(
+                    image_url=item["image_url"],
+                    original_text=item["original_text"],
+                    translated_text=translated,
+                    order_index=item["order_index"],
+                    translated_image_base64=translated_img_b64,
+                ))
+
+            except Exception as e:
+                logger.warning(f"이미지 번역 실패: {e}")
+
+        results.sort(key=lambda x: x.order_index)
+        return results
+
+    async def _generate_translated_image(
+        self,
+        image_data: bytes,
+        mime: str,
+        ocr_text: str,
+        translated_text: str,
+        language: str,
+    ) -> Optional[str]:
+        """원본 이미지의 텍스트를 번역 텍스트로 교체한 새 이미지 생성 (base64)"""
+        import base64
+
+        await self.translator._wait_for_rate_limit()
+
+        from google.genai import types
+
+        lang_name = "English" if language == "en" else "Japanese"
+
+        image_part = types.Part.from_bytes(
+            data=image_data, mime_type=mime,
+        )
+
+        prompt = (
+            f"Edit this image: replace all Korean text with {lang_name} text.\n"
+            f"Korean text found: {ocr_text}\n"
+            f"{lang_name} translation: {translated_text}\n\n"
+            f"Keep the original image layout, colors, and design style exactly the same.\n"
+            f"Only replace the text — do not change any other visual elements.\n"
+            f"Match the font size and position of the original text."
+        )
 
         try:
-            # 이미지 다운로드
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                resp = await client.get(image_url)
-                if resp.status_code != 200:
-                    logger.warning(f"이미지 다운로드 실패: {resp.status_code}")
-                    return None
-                image_data = resp.content
-
-            # MIME 타입 결정
-            ct = resp.headers.get("content-type", "").lower()
-            mime = "image/jpeg"
-            if "png" in ct:
-                mime = "image/png"
-            elif "webp" in ct:
-                mime = "image/webp"
-            elif "gif" in ct:
-                mime = "image/gif"
-
-            from google.genai import types
-
-            image_part = types.Part.from_bytes(
-                data=image_data,
-                mime_type=mime,
-            )
-
             response = self.translator.client.models.generate_content(
-                model=self.translator._model_name,
-                contents=[
-                    "이 이미지에서 한국어 텍스트만 추출해주세요. "
-                    "텍스트가 없으면 NO_TEXT만 응답하세요.",
-                    image_part,
-                ],
+                model="gemini-2.0-flash-exp",
+                contents=[prompt, image_part],
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE", "TEXT"],
+                ),
             )
 
-            if response and response.text:
-                text = response.text.strip()
-                if text == "NO_TEXT" or len(text) < 5:
-                    return None
-                return text
+            # 응답에서 이미지 파트 추출
+            if response and response.candidates:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        img_bytes = part.inline_data.data
+                        return base64.b64encode(img_bytes).decode('utf-8')
 
+            logger.info("이미지 생성 응답에 이미지 없음 (텍스트만 반환됨)")
             return None
 
         except Exception as e:
             error_str = str(e)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                # Rate limit - 재시도를 위해 예외 전파
-                raise
-            logger.warning(f"OCR 실패: {e}")
+                logger.warning("이미지 생성 rate limit")
+                await asyncio.sleep(12)
+            else:
+                logger.warning(f"이미지 생성 오류: {e}")
             return None
 
     # ──────────────── Private: Gemini API 호출 ────────────────

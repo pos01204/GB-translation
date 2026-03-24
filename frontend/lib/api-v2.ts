@@ -21,6 +21,7 @@ export interface ImageText {
   original_text: string
   translated_text: string
   order_index: number
+  translated_image_base64?: string | null
 }
 
 export interface LoginRequest {
