@@ -70,35 +70,56 @@ class ProductReader:
                     // 이미지: string[] (URL 배열)
                     const images = form.images || [];
 
-                    // 옵션: productOptionGroups 구조
-                    const optionGroups = form.productOptionGroups || form.options || [];
+                    // 옵션: form.options (국내) 또는 globalProduct의 productOptionGroups (글로벌)
                     const options = [];
-                    if (Array.isArray(optionGroups)) {
-                        for (const group of optionGroups) {
+
+                    // 국내 옵션 (form.options)
+                    const domesticOpts = form.options || form.productOptionGroups || [];
+                    if (Array.isArray(domesticOpts) && domesticOpts.length > 0) {
+                        for (const group of domesticOpts) {
                             if (!group) continue;
-                            const name = group.name || group.title || group.label || '';
-                            const productOptions = group.productOptions || group.values || group.items || [];
+                            const name = group.name || group.title || '';
+                            const vals = group.productOptions || group.values || group.items || [];
                             const values = [];
-                            if (Array.isArray(productOptions)) {
-                                for (const opt of productOptions) {
-                                    if (!opt) continue;
-                                    values.push({
-                                        value: String(opt.value || opt.name || opt.label || ''),
-                                        additional_price: opt.price || opt.additionalPrice || opt.additional_price || 0,
-                                    });
-                                }
+                            for (const opt of (Array.isArray(vals) ? vals : [])) {
+                                if (!opt) continue;
+                                const v = typeof opt.value === 'string' ? opt.value
+                                    : (Array.isArray(opt.value) ? (opt.value.find(x => x.lang === 'ko')?.value || opt.value[0]?.value || '') : String(opt.value || ''));
+                                values.push({ value: v, additional_price: opt.price || 0 });
                             }
                             if (name || values.length > 0) {
-                                options.push({
-                                    name: String(name),
-                                    values: values,
-                                    option_type: group.customerRequestType || group.type || 'basic',
-                                });
+                                options.push({ name: String(name), values, option_type: group.optionType || 'basic' });
+                            }
+                        }
+                    }
+
+                    // 글로벌 옵션 (globalProduct._detail.productOptionGroups) — 국내 없으면 참조
+                    const globalOpts = state.globalProduct?._detail?.productOptionGroups || [];
+                    if (options.length === 0 && Array.isArray(globalOpts) && globalOpts.length > 0) {
+                        for (const group of globalOpts) {
+                            if (!group) continue;
+                            // 그룹명: value는 [{lang, value}] 다국어 배열
+                            const nameArr = group.value || [];
+                            const name = Array.isArray(nameArr)
+                                ? (nameArr.find(x => x.lang === 'ko')?.value || nameArr.find(x => x.lang === 'ja')?.value || nameArr[0]?.value || '')
+                                : String(nameArr);
+                            const vals = group.productOptions || [];
+                            const values = [];
+                            for (const opt of (Array.isArray(vals) ? vals : [])) {
+                                const vArr = opt.value || [];
+                                const v = Array.isArray(vArr)
+                                    ? (vArr.find(x => x.lang === 'ko')?.value || vArr.find(x => x.lang === 'ja')?.value || vArr[0]?.value || '')
+                                    : String(vArr);
+                                values.push({ value: v, additional_price: opt.price || 0 });
+                            }
+                            if (name || values.length > 0) {
+                                options.push({ name: String(name), values, option_type: group.optionType || 'basic' });
                             }
                         }
                     }
 
                     // premiumDescription: [{uuid, type, label, value}, ...]
+                    // value는 TEXT/SUBJECT일 때 문자열, IMAGE/SPLIT_IMAGE일 때 URL 배열
                     const premDesc = form.premiumDescription || [];
                     let descriptionHtml = '';
                     const detailImageUrls = [];
@@ -107,20 +128,21 @@ class ProductReader:
                         for (const section of premDesc) {
                             if (!section) continue;
                             const type = section.type || '';
-                            const value = section.value || '';
+                            const rawValue = section.value;
                             const label = section.label || '';
 
                             if (type === 'TEXT' || type === 'SUBJECT') {
-                                if (value) htmlParts.push(type === 'SUBJECT' ? '<h3>' + value + '</h3>' : '<p>' + value + '</p>');
+                                const text = typeof rawValue === 'string' ? rawValue : '';
+                                if (text) htmlParts.push(type === 'SUBJECT' ? '<h3>' + text + '</h3>' : '<p>' + text + '</p>');
                             } else if (type === 'IMAGE' || type === 'SPLIT_IMAGE') {
-                                if (value) {
-                                    // 이미지 URL
-                                    const urls = value.split(',').map(u => u.trim()).filter(Boolean);
-                                    for (const url of urls) {
-                                        if (url.startsWith('http')) {
-                                            detailImageUrls.push(url);
-                                            htmlParts.push('<img src="' + url + '" />');
-                                        }
+                                // value가 배열(URL[]) 또는 문자열일 수 있음
+                                const urls = Array.isArray(rawValue)
+                                    ? rawValue
+                                    : (typeof rawValue === 'string' ? rawValue.split(',').map(u => u.trim()) : []);
+                                for (const url of urls) {
+                                    if (typeof url === 'string' && url.startsWith('http')) {
+                                        detailImageUrls.push(url);
+                                        htmlParts.push('<img src="' + url + '" />');
                                     }
                                 }
                             } else if (type === 'LINE') {
@@ -131,15 +153,22 @@ class ProductReader:
                         descriptionHtml = htmlParts.join('\\n');
                     }
 
-                    // 키워드
+                    // 키워드: Vuex에 없으면 hidden input에서 읽기
                     let keywords = form.keywords || [];
                     if (typeof keywords === 'string') {
                         keywords = keywords.split(',').map(k => k.trim().replace(/^#/, '')).filter(Boolean);
-                    } else if (Array.isArray(keywords)) {
+                    } else if (Array.isArray(keywords) && keywords.length > 0) {
                         keywords = keywords.map(k => {
                             if (typeof k === 'object') return k.name || k.keyword || k.value || String(k);
                             return String(k).replace(/^#/, '');
                         }).filter(Boolean);
+                    }
+                    // Vuex에 키워드 없으면 hidden input에서
+                    if (!keywords || keywords.length === 0) {
+                        const kwInput = document.querySelector('input[name="product_keyword"]');
+                        if (kwInput && kwInput.value) {
+                            keywords = kwInput.value.split(',').map(k => k.trim().replace(/^#/, '')).filter(Boolean);
+                        }
                     }
 
                     // 카테고리
