@@ -419,100 +419,60 @@ class ArtistWebSession:
             if not isinstance(item, dict):
                 continue
 
-            # UUID 형식의 ID 필드 탐색 (모든 문자열 필드에서)
-            product_id = None
-            uuid_pattern = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
-
-            # 명시적 키 우선
-            for key in ("product_id", "productId", "uuid", "id"):
-                val = item.get(key)
-                if val and isinstance(val, str) and (len(val) >= 32 or uuid_pattern.match(val)):
-                    product_id = val
-                    break
-
-            # 못 찾으면 모든 문자열 필드에서 UUID 탐색
+            # ── 확정된 idus API 필드 매핑 ──
+            # product_uuid: UUID 문자열
+            product_id = (
+                item.get("product_uuid")
+                or item.get("uuid")
+                or item.get("product_id")
+                or item.get("productId")
+            )
             if not product_id:
-                for key, val in item.items():
-                    if isinstance(val, str) and uuid_pattern.match(val):
-                        product_id = val
-                        break
-
+                # 폴백: id가 있으면 문자열로
+                raw_id = item.get("id")
+                if raw_id:
+                    product_id = str(raw_id)
             if not product_id:
                 continue
 
-            # 제목: 다양한 키 + 최장 문자열 필드 폴백
-            title = None
-            for key in ("title", "name", "productName", "product_name",
-                        "productTitle", "product_title", "displayName", "display_name"):
-                val = item.get(key)
-                if val and isinstance(val, str) and len(val) > 1:
-                    title = val
-                    break
+            # name: 작품 제목
+            title = (
+                item.get("name")
+                or item.get("title")
+                or item.get("productName")
+                or ""
+            )
 
-            # 제목을 못 찾으면, 10자 이상의 문자열 필드 중 가장 긴 것
-            if not title:
-                best = ""
-                for key, val in item.items():
-                    if isinstance(val, str) and len(val) > len(best) and len(val) >= 5:
-                        # UUID나 URL이 아닌 것만
-                        if not uuid_pattern.match(val) and not val.startswith("http"):
-                            best = val
-                if best:
-                    title = best
+            # original_price: 원래 가격 (sales_price는 할인가)
+            price = item.get("original_price") or item.get("sales_price") or item.get("price") or 0
+            if isinstance(price, str):
+                price = self._parse_price(price)
 
-            # 가격: 다양한 키
-            price = 0
-            for key in ("price", "salePrice", "sale_price", "sellingPrice",
-                        "selling_price", "originalPrice", "original_price",
-                        "discountPrice", "discount_price"):
-                val = item.get(key)
-                if val:
-                    if isinstance(val, (int, float)):
-                        price = int(val)
-                        break
-                    elif isinstance(val, str):
-                        price = self._parse_price(val)
-                        if price > 0:
-                            break
+            # main_image: 대표 이미지 URL
+            thumbnail = (
+                item.get("main_image")
+                or item.get("thumbnail_url")
+                or item.get("image")
+                or item.get("imageUrl")
+            )
 
-            # 썸네일: 다양한 키 + URL 패턴 탐색
-            thumbnail = None
-            for key in ("thumbnail_url", "thumbnailUrl", "image", "imageUrl",
-                        "representative_image", "thumbnail", "img", "photo",
-                        "photoUrl", "photo_url", "mainImage", "main_image",
-                        "representativeImageUrl", "representative_image_url"):
-                val = item.get(key)
-                if val and isinstance(val, str) and ("http" in val or val.startswith("/")):
-                    thumbnail = val
-                    break
-
-            # URL 필드 탐색 폴백
-            if not thumbnail:
-                for key, val in item.items():
-                    if isinstance(val, str) and ("image" in key.lower() or "img" in key.lower() or "photo" in key.lower() or "thumb" in key.lower()):
-                        if "http" in val or val.startswith("/"):
-                            thumbnail = val
-                            break
-
-            # 글로벌 상태
+            # 글로벌 등록 상태: global_meta.status 또는 badges 배열
             has_global = False
-            for key in ("global_status", "globalStatus", "hasGlobal", "is_global",
-                        "globalSaleStatus", "global_sale_status"):
-                val = item.get(key)
-                if val:
-                    if isinstance(val, bool):
-                        has_global = val
-                    elif isinstance(val, str):
-                        has_global = val.lower() not in ("", "none", "null", "false", "not_registered")
-                    elif isinstance(val, (int, float)):
-                        has_global = val > 0
-                    if has_global:
-                        break
+            # 1) global_meta 객체 확인
+            global_meta = item.get("global_meta")
+            if isinstance(global_meta, dict):
+                gm_status = global_meta.get("status", "")
+                has_global = gm_status.upper() in ("SALE", "PAUSE", "DRAFT")
+            # 2) badges 배열에 "GLOBAL" 포함 여부
+            if not has_global:
+                badges = item.get("badges", [])
+                if isinstance(badges, list):
+                    has_global = "GLOBAL" in badges
 
             result.append(ProductSummary(
                 product_id=str(product_id),
                 title=str(title) if title else "",
-                price=price,
+                price=int(price) if price else 0,
                 thumbnail_url=str(thumbnail) if thumbnail else None,
                 status=ProductStatus(status),
                 global_status=(
@@ -529,11 +489,23 @@ class ArtistWebSession:
         if not isinstance(body, dict):
             return items_count >= 20  # 기본 페이지 사이즈 추정
 
+        # idus 응답 구조: paging_cursor, total_products 확인
+        total_products = body.get("total_products", 0)
+        if total_products and isinstance(total_products, int):
+            loaded = (current_page + 1) * max(items_count, 20)
+            if loaded >= total_products:
+                return False
+            return True
+
+        paging_cursor = body.get("paging_cursor")
+        if paging_cursor is not None:
+            # 커서가 있으면 다음 페이지 존재
+            return bool(paging_cursor)
+
         # 다양한 구조 대응
         def _find_pagination_info(obj):
             if not isinstance(obj, dict):
                 return None
-            # 직접 pagination 필드 확인
             for key in ("totalPages", "total_pages"):
                 if key in obj:
                     total_pages = obj[key]
@@ -563,8 +535,8 @@ class ArtistWebSession:
         if isinstance(body, list) and len(body) > 0:
             return body
         if isinstance(body, dict):
-            # 일반적인 키들 우선 탐색
-            for key in ("data", "products", "items", "result", "list", "content", "rows"):
+            # idus API 확정 키 + 일반적인 키들
+            for key in ("paging_products", "data", "products", "items", "result", "list", "content", "rows"):
                 if key in body:
                     found = ArtistWebSession._find_product_array(body[key])
                     if found:

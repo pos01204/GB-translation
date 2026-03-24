@@ -431,18 +431,6 @@ export default function ProductDetailPage() {
                 <dt className="w-24 text-gray-500 shrink-0">카테고리</dt>
                 <dd className="text-gray-900">{domestic?.category_path}</dd>
               </div>
-              <div className="flex">
-                <dt className="w-24 text-gray-500 shrink-0">재고</dt>
-                <dd className="text-gray-900 flex items-center gap-1.5">
-                  {domestic?.quantity}개
-                  {domestic && domestic.quantity === domestic.price && (
-                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-yellow-50 border border-yellow-300 rounded text-xs text-yellow-700">
-                      <AlertTriangle className="w-3 h-3" />
-                      (확인 필요)
-                    </span>
-                  )}
-                </dd>
-              </div>
               {domestic?.keywords && domestic.keywords.length > 0 && (
                 <div className="flex">
                   <dt className="w-24 text-gray-500 shrink-0">키워드</dt>
