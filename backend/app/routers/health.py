@@ -984,6 +984,82 @@ async def debug_test_option_reader():
         return {"success": False, "data": result}
 
 
+@router.get("/api/debug/vuex-actions", summary="Vuex mutations/actions 목록")
+async def debug_vuex_actions():
+    """globalProduct 모듈의 mutations와 actions 목록을 덤프합니다."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    try:
+        page = _artist_session.page
+
+        # 글로벌 페이지로 이동
+        if "/global" not in page.url:
+            import re
+            m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+            if m:
+                try:
+                    await page.goto(f"https://artist.idus.com/product/{m.group(1)}/global", timeout=30000)
+                    await page.wait_for_load_state("domcontentloaded")
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+
+        result = await page.evaluate("""
+            () => {
+                const app = document.querySelector('#app');
+                if (!app || !app.__vue__ || !app.__vue__.$store) return { error: 'no store' };
+                const store = app.__vue__.$store;
+
+                // 전체 mutations 키
+                const allMutations = Object.keys(store._mutations || {});
+                // 전체 actions 키
+                const allActions = Object.keys(store._actions || {});
+
+                // globalProduct 관련만 필터
+                const gpMutations = allMutations.filter(k => k.toLowerCase().includes('global') || k.toLowerCase().includes('product'));
+                const gpActions = allActions.filter(k => k.toLowerCase().includes('global') || k.toLowerCase().includes('product'));
+
+                // 전체 목록도 (save/update/create 관련)
+                const saveMutations = allMutations.filter(k =>
+                    k.toLowerCase().includes('save') ||
+                    k.toLowerCase().includes('update') ||
+                    k.toLowerCase().includes('create') ||
+                    k.toLowerCase().includes('set') ||
+                    k.toLowerCase().includes('draft')
+                );
+                const saveActions = allActions.filter(k =>
+                    k.toLowerCase().includes('save') ||
+                    k.toLowerCase().includes('update') ||
+                    k.toLowerCase().includes('create') ||
+                    k.toLowerCase().includes('draft') ||
+                    k.toLowerCase().includes('publish')
+                );
+
+                return {
+                    totalMutations: allMutations.length,
+                    totalActions: allActions.length,
+                    gpMutations: gpMutations,
+                    gpActions: gpActions,
+                    saveMutations: saveMutations,
+                    saveActions: saveActions,
+                    // 전체 목록 (첫 100개)
+                    allMutations: allMutations.slice(0, 100),
+                    allActions: allActions.slice(0, 100),
+                };
+            }
+        """)
+
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @router.get("/api/debug/intercept-save", summary="임시저장 API 인터셉트")
 async def debug_intercept_save():
     """글로벌 페이지에서 임시저장 클릭 시 호출되는 API를 캡처합니다."""
