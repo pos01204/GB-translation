@@ -312,3 +312,142 @@ async def debug_product_page(product_id: str = ""):
     except Exception as e:
         logger.error(f"작품 페이지 디버그 실패: {e}")
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/deep-extract", summary="Vue 컴포넌트 깊이 탐색")
+async def debug_deep_extract(product_id: str = ""):
+    """제품 이미지와 옵션 데이터를 Vue 컴포넌트 트리에서 깊이 탐색합니다."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+    if not product_id:
+        return {"error": "product_id 필요"}
+
+    try:
+        page = _artist_session.page
+
+        # 이미 해당 작품 페이지에 있는지 확인, 아니면 이동
+        if product_id not in page.url:
+            await page.goto(
+                f"https://artist.idus.com/product/{product_id}",
+                timeout=30000,
+            )
+            await page.wait_for_load_state("domcontentloaded")
+            await asyncio.sleep(3)
+
+        result = await page.evaluate("""
+            () => {
+                const output = {};
+
+                // 1. 모든 Vue 컴포넌트 순회하며 이미지/옵션 데이터 탐색
+                const vueComponents = [];
+                function findVueInstances(el, depth) {
+                    if (depth > 20 || !el) return;
+                    if (el.__vue__) {
+                        const vm = el.__vue__;
+                        const data = vm.$data || {};
+                        const props = vm.$props || {};
+                        const keys = [...Object.keys(data), ...Object.keys(props)];
+                        vueComponents.push({
+                            depth,
+                            tag: el.tagName,
+                            dataKeys: keys.slice(0, 30),
+                        });
+
+                        // 이미지 관련 데이터 탐색
+                        for (const key of keys) {
+                            const val = data[key] || props[key];
+                            if (!val) continue;
+                            const lk = key.toLowerCase();
+                            if (lk.includes('image') || lk.includes('photo') || lk.includes('img')) {
+                                try {
+                                    output['vue_image_' + key] = JSON.stringify(val).substring(0, 500);
+                                } catch(e) {
+                                    output['vue_image_' + key] = String(val).substring(0, 200);
+                                }
+                            }
+                            if (lk.includes('option')) {
+                                try {
+                                    output['vue_option_' + key] = JSON.stringify(val).substring(0, 1000);
+                                } catch(e) {
+                                    output['vue_option_' + key] = String(val).substring(0, 300);
+                                }
+                            }
+                            if (lk.includes('description') || lk.includes('premium')) {
+                                try {
+                                    output['vue_desc_' + key] = JSON.stringify(val).substring(0, 1000);
+                                } catch(e) {
+                                    output['vue_desc_' + key] = String(val).substring(0, 300);
+                                }
+                            }
+                        }
+                    }
+                    for (const child of (el.children || [])) {
+                        findVueInstances(child, depth + 1);
+                    }
+                }
+                findVueInstances(document.body, 0);
+                output.vueComponentCount = vueComponents.length;
+                output.vueComponentSample = vueComponents.slice(0, 10);
+
+                // 2. v-img 요소 탐색
+                const vImgs = document.querySelectorAll('.v-image, .v-img, [class*="v-image"]');
+                output.vImgCount = vImgs.length;
+                output.vImgs = Array.from(vImgs).slice(0, 15).map(el => {
+                    const bgDiv = el.querySelector('.v-image__image');
+                    let bgUrl = '';
+                    if (bgDiv) {
+                        const style = bgDiv.getAttribute('style') || '';
+                        const match = style.match(/url\\(['"]?(https?:\\/\\/[^'"\\)]+)/);
+                        if (match) bgUrl = match[1];
+                    }
+                    return {
+                        classes: (el.className || '').substring(0, 80),
+                        size: el.offsetWidth + 'x' + el.offsetHeight,
+                        bgUrl: bgUrl.substring(0, 200),
+                        lazySrc: el.getAttribute('lazy-src') || '',
+                        src: el.getAttribute('src') || '',
+                    };
+                });
+
+                // 3. data-src, data-image 속성 탐색
+                const dataSrcEls = document.querySelectorAll('[data-src], [data-image], [data-original]');
+                output.dataSrcCount = dataSrcEls.length;
+                output.dataSrcs = Array.from(dataSrcEls).slice(0, 10).map(el => ({
+                    tag: el.tagName,
+                    dataSrc: (el.getAttribute('data-src') || '').substring(0, 150),
+                    dataImage: (el.getAttribute('data-image') || '').substring(0, 150),
+                }));
+
+                // 4. Vuex/Pinia 스토어 탐색
+                const app = document.querySelector('#app');
+                if (app && app.__vue__) {
+                    const vm = app.__vue__;
+                    if (vm.$store) {
+                        const state = vm.$store.state;
+                        output.vuexKeys = Object.keys(state).slice(0, 20);
+                        for (const key of Object.keys(state)) {
+                            const lk = key.toLowerCase();
+                            if (lk.includes('product') || lk.includes('image') || lk.includes('option')) {
+                                try {
+                                    output['vuex_' + key] = JSON.stringify(state[key]).substring(0, 1000);
+                                } catch(e) {
+                                    output['vuex_' + key] = String(state[key]).substring(0, 300);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return output;
+            }
+        """)
+
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        logger.error(f"Deep extract 실패: {e}")
+        return {"success": False, "error": str(e)}
