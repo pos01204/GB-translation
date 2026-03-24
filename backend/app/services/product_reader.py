@@ -198,7 +198,7 @@ class ProductReader:
                         premiumDescriptionRaw: premDesc.map(s => ({
                             type: s?.type || '',
                             label: s?.label || '',
-                            value: (s?.value || '').substring(0, 500),
+                            value: Array.isArray(s?.value) ? JSON.stringify(s.value) : String(s?.value || '').substring(0, 500),
                         })),
                         keywords: keywords,
                         giftWrapping: (form.attributeIds || []).length > 0,
