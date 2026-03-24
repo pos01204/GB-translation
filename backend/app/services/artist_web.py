@@ -125,11 +125,10 @@ class ArtistWebSession:
             return False
 
     async def is_authenticated(self) -> bool:
-        """인증 상태 확인"""
-        if not self._authenticated or not self.page:
-            return False
-        current_url = self.page.url
-        return "/login" not in current_url
+        """인증 상태 확인 — _authenticated 플래그 기반 (URL 체크 제거)"""
+        # 로그인 성공 시 _authenticated=True로 설정됨
+        # 페이지 URL 체크 제거: 디버그/네비게이션으로 URL이 변할 수 있어 불안정
+        return self._authenticated and self.page is not None
 
     async def get_session_info(self) -> dict:
         """현재 세션 상태 정보 반환"""
@@ -659,32 +658,45 @@ class ArtistWebSession:
         if not await self.is_authenticated():
             raise Exception("로그인이 필요합니다")
 
-        url = f"{settings.artist_web_base_url}/product/{product_id}"
+        # 이미 해당 작품 페이지에 있으면 네비게이션 스킵
+        if product_id in (self.page.url or ""):
+            logger.info(f"이미 작품 페이지에 위치: {product_id}")
+            return True
 
+        # SPA 내부 네비게이션 — page.goto 대신 location.href 사용 (ERR_ABORTED 방지)
+        target_path = f"/product/{product_id}"
         try:
-            await self.page.goto(url, timeout=settings.page_load_timeout)
-            await self.page.wait_for_load_state("domcontentloaded")
-            # SPA 렌더링 대기 — networkidle 대신 고정 대기
-            await asyncio.sleep(2)
-        except Exception as e:
-            logger.warning(f"작품 페이지 로딩 중 타임아웃 (재시도): {e}")
-            try:
-                # 재시도: 이미 네비게이션 진행 중이므로 load만 대기
-                await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
-                await asyncio.sleep(2)
-            except Exception as e2:
-                logger.error(f"작품 페이지 로딩 재시도도 실패: {e2}")
-
-        # 추가 SPA 렌더링 대기 — 주요 콘텐츠 요소 탐색
-        try:
-            await self.page.wait_for_selector(
-                'input, textarea, [contenteditable], img[src*="idus"]',
-                timeout=10000,
+            logger.info(f"작품 페이지 이동: {target_path}")
+            await self.page.evaluate(
+                f"window.location.href = '{target_path}'"
             )
-        except Exception:
-            logger.warning("작품 페이지 콘텐츠 요소 대기 타임아웃 (계속 진행)")
+            await asyncio.sleep(4)  # SPA 라우팅 + 렌더링 대기
 
-        # 페이지 로딩 확인
+            # Vuex 데이터 로딩 대기 — productForm._item이 채워질 때까지
+            for attempt in range(10):
+                has_data = await self.page.evaluate("""
+                    () => {
+                        const app = document.querySelector('#app');
+                        if (!app || !app.__vue__ || !app.__vue__.$store) return false;
+                        const item = app.__vue__.$store.state.productForm?._item;
+                        return item && item.id > 0;
+                    }
+                """)
+                if has_data:
+                    logger.info(f"Vuex 데이터 로딩 확인 (시도 {attempt + 1})")
+                    break
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.warning(f"SPA 네비게이션 실패, page.goto 폴백: {e}")
+            try:
+                url = f"{settings.artist_web_base_url}/product/{product_id}"
+                await self.page.goto(url, timeout=settings.page_load_timeout)
+                await self.page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(3)
+            except Exception as e2:
+                logger.error(f"page.goto 폴백도 실패: {e2}")
+
         success = "product" in self.page.url
         if success:
             logger.info(f"작품 페이지 이동 성공: {product_id}")
