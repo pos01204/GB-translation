@@ -94,12 +94,21 @@ class GBProductTranslator:
         en_title, en_desc, en_keywords, en_blocks = "", "", [], []
         ja_title, ja_desc, ja_keywords, ja_blocks = "", "", [], []
 
-        # 1. 이미지 OCR — 텍스트 수집 (1회, 이미지 생성 없음)
+        # 1. 이미지 OCR — 텍스트 수집 + 한글 이미지 필터링
         ocr_texts: list[str] = []
+        ocr_results: list[dict] = []
+        korean_image_urls: set[str] = set()  # 한글 포함 이미지 URL (제외 대상)
         if domestic.detail_images:
             ocr_results = await self._ocr_all_images(domestic.detail_images)
-            ocr_texts = [r["original_text"] for r in ocr_results]
-            logger.info(f"이미지 OCR 완료: {len(ocr_texts)}개 텍스트 수집")
+            for r in ocr_results:
+                ocr_texts.append(r["original_text"])
+                # 한글 문자가 포함된 이미지 URL을 제외 목록에 추가
+                if any('\uac00' <= c <= '\ud7a3' for c in r["original_text"]):
+                    korean_image_urls.add(r["image_url"])
+            logger.info(
+                f"이미지 OCR 완료: {len(ocr_texts)}개 텍스트, "
+                f"한글 이미지 {len(korean_image_urls)}개 제외"
+            )
 
         # 2. 제목+키워드
         if do_en:
@@ -114,16 +123,16 @@ class GBProductTranslator:
             )
             logger.info("JA 제목+키워드 완료")
 
-        # 3. AI 상세 설명 재구성 → HTML + premiumDescription 블록 배열
+        # 3. AI 상세 설명 재구성 → HTML + premiumDescription 블록 배열 (이미지 포함)
         if do_en:
             en_desc, en_blocks = await self._build_gb_description(
-                domestic, ocr_texts, "en",
+                domestic, ocr_texts, "en", korean_image_urls,
             )
             logger.info(f"EN 설명 재구성 완료 ({len(en_blocks)} 블록)")
 
         if do_ja:
             ja_desc, ja_blocks = await self._build_gb_description(
-                domestic, ocr_texts, "ja",
+                domestic, ocr_texts, "ja", korean_image_urls,
             )
             logger.info(f"JA 설명 재구성 완료 ({len(ja_blocks)} 블록)")
 
@@ -270,15 +279,15 @@ class GBProductTranslator:
         domestic: DomesticProduct,
         ocr_texts: list[str],
         language: str,
+        korean_image_urls: set[str] | None = None,
     ) -> tuple[str, list[dict]]:
         """KR 데이터를 기반으로 GB 설명 생성 → (HTML, premiumDescription 블록 배열)
 
-        Returns:
-            (description_html, description_blocks)
-            - description_html: 미리보기용 HTML
-            - description_blocks: 작가웹 에디터용 premiumDescription 블록 배열
+        텍스트 사이에 한글 없는 이미지를 적절히 배치하여
+        완성도 있는 글로벌 상세페이지를 구성합니다.
         """
-        import uuid as uuid_mod
+        if korean_image_urls is None:
+            korean_image_urls = set()
 
         # 모든 KR 텍스트 수집
         parts = []
@@ -291,9 +300,9 @@ class GBProductTranslator:
         if domestic.features:
             parts.append(f"특장점: {' / '.join(domestic.features)}")
         if domestic.description_html:
-            import re
-            clean_text = re.sub(r'<[^>]+>', ' ', domestic.description_html)
-            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            import re as _re
+            clean_text = _re.sub(r'<[^>]+>', ' ', domestic.description_html)
+            clean_text = _re.sub(r'\s+', ' ', clean_text).strip()
             if clean_text:
                 parts.append(f"설명: {clean_text[:500]}")
         if domestic.options:
@@ -320,10 +329,143 @@ class GBProductTranslator:
         # HTML 태그 보장
         html = self._ensure_html_tags(result)
 
-        # HTML → premiumDescription 블록 배열 변환
-        blocks = self._html_to_blocks(html)
+        # HTML → 텍스트 블록 배열
+        text_blocks = self._html_to_blocks(html)
+
+        # 가용 이미지 큐 구성 (한글 없는 이미지만)
+        available_images = self._collect_available_images(
+            domestic, korean_image_urls,
+        )
+
+        # 텍스트 블록 사이에 이미지 삽입
+        blocks = self._insert_images_into_blocks(text_blocks, available_images)
+
+        # HTML도 이미지 포함하여 업데이트 (미리보기용)
+        html = self._blocks_to_html(blocks)
+
+        logger.info(
+            f"GB 설명 블록: {len(blocks)}개 "
+            f"(TEXT={sum(1 for b in blocks if b['type']=='TEXT')}, "
+            f"IMAGE={sum(1 for b in blocks if b['type'] in ('IMAGE','SPLIT_IMAGE'))}, "
+            f"사용 이미지={len(available_images)}개)"
+        )
 
         return html, blocks
+
+    @staticmethod
+    def _collect_available_images(
+        domestic: DomesticProduct,
+        korean_image_urls: set[str],
+    ) -> list[str]:
+        """product_images + detail_images(한글 없는 것)에서 가용 이미지 URL 수집"""
+        urls = []
+        seen = set()
+
+        # product_images (한글 없음 확실)
+        for img in domestic.product_images:
+            url = img.url
+            if url and url not in seen:
+                urls.append(url)
+                seen.add(url)
+
+        # detail_images 중 한글 없는 것
+        for img in domestic.detail_images:
+            url = img.url
+            if url and url not in seen and url not in korean_image_urls:
+                urls.append(url)
+                seen.add(url)
+
+        return urls
+
+    @staticmethod
+    def _insert_images_into_blocks(
+        text_blocks: list[dict],
+        available_images: list[str],
+    ) -> list[dict]:
+        """텍스트 블록 사이에 이미지를 적절히 삽입
+
+        전략:
+        - SUBJECT 뒤 TEXT 1-2개 후에 이미지 배치
+        - 이미지 2장이 남으면 SPLIT_IMAGE, 1장이면 IMAGE
+        - SUBJECT 사이에 BLANK + LINE + BLANK로 시각적 구분
+        """
+        if not available_images:
+            return text_blocks
+
+        result = []
+        img_queue = list(available_images)
+        text_count_since_image = 0
+        subject_count = 0
+
+        for i, block in enumerate(text_blocks):
+            # SUBJECT 전에 구분선 삽입 (첫 번째 제외)
+            if block["type"] == "SUBJECT" and subject_count > 0:
+                result.append(GBProductTranslator._make_block("BLANK"))
+                result.append(GBProductTranslator._make_block("LINE"))
+                result.append(GBProductTranslator._make_block("BLANK"))
+
+            result.append(block)
+
+            if block["type"] == "SUBJECT":
+                subject_count += 1
+                text_count_since_image = 0
+            elif block["type"] == "TEXT":
+                text_count_since_image += 1
+
+                # TEXT 1-2개 후에 이미지 삽입
+                if text_count_since_image >= 2 and img_queue:
+                    result.append(GBProductTranslator._make_block("BLANK"))
+                    if len(img_queue) >= 2 and subject_count % 2 == 0:
+                        # SPLIT_IMAGE (2장 나란히)
+                        urls = [img_queue.pop(0), img_queue.pop(0)]
+                        result.append(GBProductTranslator._make_block("SPLIT_IMAGE", urls))
+                    else:
+                        # IMAGE (1장)
+                        url = img_queue.pop(0)
+                        result.append(GBProductTranslator._make_block("IMAGE", [url]))
+                    result.append(GBProductTranslator._make_block("BLANK"))
+                    text_count_since_image = 0
+
+        # 남은 이미지 마지막에 추가
+        while img_queue:
+            result.append(GBProductTranslator._make_block("BLANK"))
+            if len(img_queue) >= 2:
+                urls = [img_queue.pop(0), img_queue.pop(0)]
+                result.append(GBProductTranslator._make_block("SPLIT_IMAGE", urls))
+            else:
+                url = img_queue.pop(0)
+                result.append(GBProductTranslator._make_block("IMAGE", [url]))
+
+        return result
+
+    @staticmethod
+    def _blocks_to_html(blocks: list[dict]) -> str:
+        """premiumDescription 블록 배열 → 미리보기용 HTML"""
+        parts = []
+        for block in blocks:
+            t = block.get("type", "")
+            v = block.get("value", "")
+            if t == "SUBJECT":
+                parts.append(f'<h3>{v}</h3>')
+            elif t == "TEXT":
+                parts.append(f'<p>{v}</p>')
+            elif t == "IMAGE":
+                urls = v if isinstance(v, list) else [v]
+                for url in urls:
+                    if url:
+                        parts.append(f'<img src="{url}" style="max-width:100%;border-radius:8px" />')
+            elif t == "SPLIT_IMAGE":
+                urls = v if isinstance(v, list) else []
+                if urls:
+                    parts.append('<div style="display:flex;gap:8px">')
+                    for url in urls:
+                        parts.append(f'<img src="{url}" style="width:49%;border-radius:8px" />')
+                    parts.append('</div>')
+            elif t == "LINE":
+                parts.append('<hr />')
+            elif t == "BLANK":
+                parts.append('<br />')
+        return '\n'.join(parts)
 
     @staticmethod
     def _make_block(block_type: str, value: str = "") -> dict:
