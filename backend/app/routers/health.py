@@ -467,10 +467,16 @@ async def debug_vuex_product(product_id: str = ""):
 
     try:
         page = _artist_session.page
-        if product_id not in page.url:
-            await page.goto(f"https://artist.idus.com/product/{product_id}", timeout=30000)
-            await page.wait_for_load_state("domcontentloaded")
-            await asyncio.sleep(3)
+
+        # 네비게이션 — 에러 시 무시하고 현재 페이지에서 시도
+        try:
+            if product_id not in page.url:
+                await page.goto(f"https://artist.idus.com/product/{product_id}", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(3)
+        except Exception as nav_err:
+            logger.warning(f"네비게이션 실패 (현재 페이지에서 시도): {nav_err}")
+            await asyncio.sleep(2)
 
         result = await page.evaluate("""
             () => {
