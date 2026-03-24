@@ -87,6 +87,7 @@ async def initialize_v1_services():
 
         # translation 라우터에 참조 업데이트
         translation.configure(artist_session, gb_translator)
+        registration.configure(artist_session, gb_translator)
 
     # v1 라우터에 참조 주입
     v1.update_refs(scraper, translator)
@@ -116,7 +117,7 @@ async def lifespan(app: FastAPI):
     session.configure(artist_session)
     products.configure(artist_session)
     translation.configure(artist_session, gb_translator, initialize_v1_services)
-    registration.configure(artist_session, gb_translator)
+    registration.configure(artist_session, gb_translator, initialize_v1_services)
 
     yield
 

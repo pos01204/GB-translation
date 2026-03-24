@@ -3,6 +3,9 @@
 
 작가웹의 작품 수정 페이지(국내 탭)에서
 제목, 가격, 이미지, 설명, 옵션, 키워드 등 전체 데이터를 추출합니다.
+
+핵심: "작품 설명" 섹션의 "수정하기" 버튼을 클릭하여
+상세 이미지, HTML 설명, 특장점 등 전체 콘텐츠를 노출시킨 뒤 추출합니다.
 """
 import asyncio
 import re
@@ -22,6 +25,12 @@ RESTRICTED_CATEGORIES = [
     "식품", "가구", "식물", "디퓨저",
     "14k", "18k", "24k",
 ]
+
+# 이미지 필터링용 패턴
+_IMAGE_EXCLUDE_PATTERNS = re.compile(
+    r'logo|icon|profile|avatar|10x10|favicon|placeholder|spinner',
+    re.IGNORECASE,
+)
 
 
 class ProductReader:
@@ -47,13 +56,20 @@ class ProductReader:
         # 국내 탭 활성화 확인
         await self._ensure_domestic_tab()
 
+        # 디버그: 모든 input/textarea 필드 덤프
+        await self._dump_input_fields()
+
+        # "작품 설명" 섹션의 "수정하기" 버튼 클릭 → 상세 에디터 노출
+        await self._open_description_editor()
+
         # 각 필드 추출 (순차 — 페이지 상태 의존)
         title = await self._read_title()
         price = await self._read_price()
-        quantity = await self._read_quantity()
+        quantity = await self._read_quantity(price)
         is_made_to_order = await self._read_made_to_order()
         category_path = await self._read_category()
-        images = await self._read_images()
+        product_images = await self._read_product_images()
+        detail_images = await self._read_detail_images()
         intro = await self._read_intro()
         features = await self._read_features()
         process_steps = await self._read_process_steps()
@@ -79,7 +95,8 @@ class ProductReader:
             is_made_to_order=is_made_to_order,
             category_path=category_path,
             category_restricted=category_restricted,
-            product_images=images,
+            product_images=product_images,
+            detail_images=detail_images,
             intro=intro,
             features=features,
             process_steps=process_steps,
@@ -92,7 +109,10 @@ class ProductReader:
 
         logger.info(
             f"국내 데이터 추출 완료: {product_id} "
-            f"(제목={title[:20]}..., 이미지={len(images)}, 옵션={len(options)})"
+            f"(제목={title[:20] if title else ''}..., "
+            f"작품이미지={len(product_images)}, "
+            f"상세이미지={len(detail_images)}, "
+            f"옵션={len(options)})"
         )
         return product
 
@@ -118,7 +138,17 @@ class ProductReader:
         except Exception:
             logger.debug("이미지 요소 대기 타임아웃 (이미지 없는 작품일 수 있음)")
 
-        # 3단계: 추가 렌더링 대기
+        # 3단계: Vue/Vuetify 앱 렌더링 대기
+        try:
+            await self.page.wait_for_selector(
+                '.v-application--wrap, .v-application, [data-app]',
+                timeout=5000,
+            )
+            logger.debug("Vuetify 앱 컨테이너 감지됨")
+        except Exception:
+            logger.debug("Vuetify 앱 컨테이너 미감지 (비-Vuetify 레이아웃일 수 있음)")
+
+        # 4단계: 추가 렌더링 대기
         await asyncio.sleep(2)
 
         # 디버깅: 현재 페이지 상태 로깅
@@ -131,6 +161,8 @@ class ProductReader:
                     inputCount: document.querySelectorAll('input').length,
                     textareaCount: document.querySelectorAll('textarea').length,
                     formCount: document.querySelectorAll('form').length,
+                    vuetifyInputCount: document.querySelectorAll('.v-input, .v-text-field').length,
+                    buttonCount: document.querySelectorAll('button').length,
                 })
             """)
             logger.info(f"페이지 콘텐츠 상태: {page_state}")
@@ -154,6 +186,169 @@ class ProductReader:
                     logger.info("국내 탭 활성화")
         except Exception as e:
             logger.warning(f"국내 탭 전환 시도 중 오류 (무시): {e}")
+
+    async def _dump_input_fields(self):
+        """디버그: 페이지의 모든 input/textarea 필드 정보 덤프"""
+        try:
+            fields_info = await self.page.evaluate("""
+                () => {
+                    const results = [];
+                    const inputs = document.querySelectorAll('input, textarea');
+                    for (const el of inputs) {
+                        // 가장 가까운 label 텍스트 찾기
+                        let labelText = '';
+                        // 1) for 속성 기반 label
+                        if (el.id) {
+                            const lbl = document.querySelector('label[for="' + el.id + '"]');
+                            if (lbl) labelText = lbl.textContent.trim();
+                        }
+                        // 2) 부모 .v-input 내 label
+                        if (!labelText) {
+                            const vInput = el.closest('.v-input, .v-text-field');
+                            if (vInput) {
+                                const lbl = vInput.querySelector('label, .v-label');
+                                if (lbl) labelText = lbl.textContent.trim();
+                            }
+                        }
+                        // 3) 가장 가까운 부모의 label
+                        if (!labelText) {
+                            const parent = el.closest('.form-group, .field, [class*="field"]');
+                            if (parent) {
+                                const lbl = parent.querySelector('label');
+                                if (lbl) labelText = lbl.textContent.trim();
+                            }
+                        }
+
+                        results.push({
+                            tag: el.tagName.toLowerCase(),
+                            type: el.type || '',
+                            name: el.name || '',
+                            placeholder: (el.placeholder || '').substring(0, 80),
+                            value: (el.value || '').substring(0, 50),
+                            label: labelText.substring(0, 50),
+                            classes: (el.className || '').toString().substring(0, 80),
+                        });
+                    }
+                    return results;
+                }
+            """)
+            logger.info(f"=== INPUT FIELD DUMP ({len(fields_info)} fields) ===")
+            for i, f in enumerate(fields_info):
+                logger.info(
+                    f"  [{i}] <{f['tag']}> type={f['type']} name={f['name']} "
+                    f"placeholder=\"{f['placeholder']}\" "
+                    f"value=\"{f['value']}\" label=\"{f['label']}\""
+                )
+            logger.info("=== END INPUT FIELD DUMP ===")
+        except Exception as e:
+            logger.warning(f"Input 필드 덤프 실패: {e}")
+
+    async def _open_description_editor(self):
+        """'작품 설명' 섹션의 '수정하기' 버튼을 클릭하여 상세 에디터를 노출"""
+        try:
+            # 전략 1: "작품 설명" 텍스트 근처의 "수정하기" 버튼
+            clicked = False
+
+            # Playwright locator 기반 탐색 — 여러 셀렉터 시도
+            selectors = [
+                # "작품 설명" 섹션 내 "수정하기" 버튼
+                'section:has-text("작품 설명") button:has-text("수정하기")',
+                'div:has-text("작품 설명") button:has-text("수정하기")',
+                # Vuetify card/expansion panel 내부
+                '.v-card:has-text("작품 설명") button:has-text("수정하기")',
+                '.v-expansion-panel:has-text("작품 설명") button:has-text("수정하기")',
+            ]
+
+            for sel in selectors:
+                try:
+                    btn = self.page.locator(sel).first
+                    if await btn.count() > 0:
+                        await btn.scroll_into_view_if_needed()
+                        await btn.click()
+                        clicked = True
+                        logger.info(f"'수정하기' 버튼 클릭 성공 (selector: {sel})")
+                        break
+                except Exception:
+                    continue
+
+            # 전략 2: JS로 "수정하기" 버튼을 "작품 설명" 근처에서 탐색
+            if not clicked:
+                clicked = await self.page.evaluate("""
+                    () => {
+                        // 모든 버튼에서 "수정하기" 텍스트를 가진 것 찾기
+                        const buttons = Array.from(document.querySelectorAll('button, .v-btn'));
+                        const editButtons = buttons.filter(
+                            b => b.textContent.trim().includes('수정하기')
+                        );
+
+                        // "작품 설명" 텍스트와 가장 가까운 "수정하기" 버튼 찾기
+                        const descHeaders = Array.from(
+                            document.querySelectorAll('h1, h2, h3, h4, h5, h6, .v-card__title, .v-subheader, span, div, p')
+                        ).filter(el => {
+                            const text = el.textContent.trim();
+                            return text.includes('작품 설명') && text.length < 30;
+                        });
+
+                        for (const header of descHeaders) {
+                            // header와 같은 섹션/카드에 있는 수정하기 버튼 찾기
+                            const container = header.closest(
+                                'section, .v-card, .v-expansion-panel, [class*="section"], [class*="description"]'
+                            ) || header.parentElement?.parentElement;
+                            if (!container) continue;
+
+                            const btn = container.querySelector('button, .v-btn');
+                            if (btn && btn.textContent.trim().includes('수정하기')) {
+                                btn.click();
+                                return true;
+                            }
+                        }
+
+                        // Fallback: 가장 마지막 "수정하기" 버튼 (설명 섹션이 보통 아래쪽)
+                        if (editButtons.length > 0) {
+                            const lastBtn = editButtons[editButtons.length - 1];
+                            lastBtn.click();
+                            return true;
+                        }
+
+                        return false;
+                    }
+                """)
+                if clicked:
+                    logger.info("'수정하기' 버튼 클릭 성공 (JS fallback)")
+
+            if not clicked:
+                logger.warning(
+                    "'작품 설명' 수정하기 버튼을 찾지 못함 — "
+                    "에디터가 이미 열려있거나 페이지 구조가 다를 수 있음"
+                )
+                return
+
+            # 에디터 로딩 대기
+            await asyncio.sleep(2)
+
+            # 에디터 콘텐츠 렌더링 대기 — 이미지, contenteditable 등
+            editor_selectors = [
+                '[contenteditable="true"]',
+                '.ql-editor',
+                '.ProseMirror',
+                '.tiptap',
+                '.v-textarea textarea',
+                'textarea[rows]',
+                'img[src*="idus"]',
+            ]
+            for sel in editor_selectors:
+                try:
+                    await self.page.wait_for_selector(sel, timeout=5000)
+                    logger.info(f"수정하기 클릭 후 에디터 요소 감지: {sel}")
+                    break
+                except Exception:
+                    continue
+
+            # 추가 렌더링 안정화
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.warning(f"작품 설명 수정하기 버튼 처리 중 오류: {e}")
 
     async def _read_title(self) -> str:
         """작품명 추출"""
@@ -189,17 +384,74 @@ class ProductReader:
             logger.warning(f"가격 추출 실패: {e}")
         return 0
 
-    async def _read_quantity(self) -> int:
-        """수량 추출"""
+    async def _read_quantity(self, price: int = 0) -> int:
+        """수량 추출 — Vuetify .v-text-field 기반 탐색"""
         try:
-            # "수량" 라벨 인접 input
-            quantity_section = self.page.locator(
-                'label:has-text("수량"), div:has-text("수량")'
-            ).first.locator('..')
-            qty_input = quantity_section.locator('input').first
-            if await qty_input.count() > 0:
-                val = await qty_input.input_value()
-                return int(re.sub(r'[^\d]', '', val)) if val else 0
+            # 전략 1: JS로 Vuetify input 그룹에서 "수량" 라벨을 가진 필드 탐색
+            quantity = await self.page.evaluate("""
+                (price) => {
+                    // Vuetify v-input / v-text-field 그룹 탐색
+                    const vInputs = document.querySelectorAll('.v-input, .v-text-field');
+                    for (const vInput of vInputs) {
+                        const label = vInput.querySelector('label, .v-label');
+                        if (!label) continue;
+                        const labelText = label.textContent.trim();
+                        if (!labelText.includes('수량')) continue;
+
+                        const input = vInput.querySelector('input');
+                        if (!input || !input.value) continue;
+
+                        const val = parseInt(input.value.replace(/[^\\d]/g, ''), 10);
+                        if (isNaN(val)) continue;
+
+                        // 가격과 동일하면 잘못 읽은 것 — 수량이 아님
+                        if (price > 0 && val === price) {
+                            return -1;  // sentinel: price collision
+                        }
+                        return val;
+                    }
+
+                    // 전략 2: placeholder나 name에 수량 관련 키워드
+                    const inputs = document.querySelectorAll('input');
+                    for (const input of inputs) {
+                        const ph = input.placeholder || '';
+                        const nm = input.name || '';
+                        if ((ph + nm).includes('수량') || (ph + nm).toLowerCase().includes('quantity') || (ph + nm).toLowerCase().includes('stock')) {
+                            const val = parseInt(input.value.replace(/[^\\d]/g, ''), 10);
+                            if (isNaN(val)) continue;
+                            if (price > 0 && val === price) return -1;
+                            return val;
+                        }
+                    }
+
+                    // 전략 3: label 텍스트 "수량" 근처의 input
+                    const allLabels = document.querySelectorAll('label, .label, [class*="label"]');
+                    for (const lbl of allLabels) {
+                        if (!lbl.textContent.trim().includes('수량')) continue;
+                        // 같은 부모 컨테이너 내 input 탐색
+                        const container = lbl.closest('.v-input, .form-group, .field, [class*="row"], [class*="group"]')
+                            || lbl.parentElement;
+                        if (!container) continue;
+                        const input = container.querySelector('input');
+                        if (!input || !input.value) continue;
+                        const val = parseInt(input.value.replace(/[^\\d]/g, ''), 10);
+                        if (isNaN(val)) continue;
+                        if (price > 0 && val === price) return -1;
+                        return val;
+                    }
+
+                    return 0;
+                }
+            """, price)
+
+            if quantity == -1:
+                logger.warning(
+                    f"수량 값이 가격({price})과 동일 — 가격 필드를 수량으로 잘못 읽었을 가능성. 0으로 반환"
+                )
+                return 0
+
+            return quantity if quantity and quantity > 0 else 0
+
         except Exception as e:
             logger.warning(f"수량 추출 실패: {e}")
         return 0
@@ -253,50 +505,113 @@ class ProductReader:
             logger.warning(f"카테고리 추출 실패: {e}")
         return ""
 
-    async def _read_images(self) -> list[ProductImage]:
-        """작품 이미지 URL 및 순서 추출"""
+    async def _read_product_images(self) -> list[ProductImage]:
+        """작품 이미지 (대표 + 추가) 추출 — '작품 이미지' 업로드 섹션 스코프"""
         images = []
         try:
-            # JavaScript로 이미지 추출 (더 넓은 범위의 셀렉터 사용)
             images_data = await self.page.evaluate("""
                 () => {
                     const results = [];
                     const seen = new Set();
 
-                    // 1. idus 이미지 서버의 모든 img 태그
-                    const imgSelectors = [
-                        'img[src*="image.idus.com"]',
-                        'img[src*="idus-file"]',
-                        'img[src*="idus"]',
-                        'img[src*="cloudfront"]',
-                    ];
+                    // "작품 이미지" 텍스트가 있는 섹션 컨테이너 찾기
+                    let imageSection = null;
+                    const headers = document.querySelectorAll(
+                        'h1, h2, h3, h4, h5, h6, .v-card__title, .v-subheader, span, div, label, p'
+                    );
+                    for (const h of headers) {
+                        const text = h.textContent.trim();
+                        if (text.includes('작품 이미지') && text.length < 30) {
+                            imageSection = h.closest(
+                                'section, .v-card, [class*="section"], [class*="image-upload"], [class*="upload"]'
+                            ) || h.parentElement?.parentElement?.parentElement;
+                            break;
+                        }
+                    }
 
-                    for (const selector of imgSelectors) {
-                        const imgs = document.querySelectorAll(selector);
+                    // 이미지 추출 함수
+                    function extractFromContainer(container) {
+                        if (!container) return;
+                        const imgs = container.querySelectorAll('img');
                         for (const img of imgs) {
                             const src = img.src || img.dataset?.src || img.getAttribute('data-src') || '';
-                            if (!src || seen.has(src)) continue;
-                            // 아이콘/로고/썸네일 필터링
-                            if (src.includes('logo') || src.includes('icon')) continue;
-                            // 너무 작은 이미지 제외 (아이콘일 가능성)
+                            if (!src) continue;
+                            if (seen.has(src)) continue;
+                            // 필터: 로고, 아이콘 등 제외
+                            const srcLower = src.toLowerCase();
+                            if (srcLower.includes('logo') || srcLower.includes('icon')
+                                || srcLower.includes('profile') || srcLower.includes('avatar')
+                                || srcLower.includes('10x10') || srcLower.includes('favicon')
+                                || srcLower.includes('placeholder') || srcLower.includes('spinner')) {
+                                continue;
+                            }
+                            // 최소 크기 80px
                             const w = img.naturalWidth || img.width || 0;
                             const h = img.naturalHeight || img.height || 0;
-                            if (w > 0 && w < 50 && h > 0 && h < 50) continue;
+                            if (w > 0 && w < 80 && h > 0 && h < 80) continue;
                             seen.add(src);
                             results.push(src);
                         }
-                    }
 
-                    // 2. background-image에서 idus 이미지 추출
-                    const allEls = document.querySelectorAll('[style*="background-image"]');
-                    for (const el of allEls) {
-                        const style = el.getAttribute('style') || '';
-                        const match = style.match(/url\\(['"]?(https?:\\/\\/[^'"\\)]*idus[^'"\\)]*)/);
-                        if (match && !seen.has(match[1])) {
-                            seen.add(match[1]);
-                            results.push(match[1]);
+                        // background-image
+                        const bgEls = container.querySelectorAll('[style*="background-image"]');
+                        for (const el of bgEls) {
+                            const style = el.getAttribute('style') || '';
+                            const match = style.match(/url\\(['"]?(https?:\\/\\/[^'"\\)]+)/);
+                            if (match && !seen.has(match[1])) {
+                                const srcLower = match[1].toLowerCase();
+                                if (srcLower.includes('logo') || srcLower.includes('icon')
+                                    || srcLower.includes('profile') || srcLower.includes('avatar')
+                                    || srcLower.includes('10x10')) {
+                                    continue;
+                                }
+                                seen.add(match[1]);
+                                results.push(match[1]);
+                            }
                         }
                     }
+
+                    // 섹션이 찾아졌으면 그 안에서만 추출
+                    if (imageSection) {
+                        extractFromContainer(imageSection);
+                    }
+
+                    // 섹션을 못찾았거나 결과가 없으면 전체 범위에서 추출하되 필터링 강화
+                    if (results.length === 0) {
+                        const imgSelectors = [
+                            'img[src*="image.idus.com"]',
+                            'img[src*="idus-file"]',
+                            'img[src*="idus"]',
+                            'img[src*="cloudfront"]',
+                        ];
+                        for (const selector of imgSelectors) {
+                            const imgs = document.querySelectorAll(selector);
+                            for (const img of imgs) {
+                                const src = img.src || img.dataset?.src || '';
+                                if (!src || seen.has(src)) continue;
+                                const srcLower = src.toLowerCase();
+                                if (srcLower.includes('logo') || srcLower.includes('icon')
+                                    || srcLower.includes('profile') || srcLower.includes('avatar')
+                                    || srcLower.includes('10x10') || srcLower.includes('favicon')
+                                    || srcLower.includes('placeholder') || srcLower.includes('spinner')) {
+                                    continue;
+                                }
+                                const w = img.naturalWidth || img.width || 0;
+                                const h = img.naturalHeight || img.height || 0;
+                                if (w > 0 && w < 80 && h > 0 && h < 80) continue;
+                                seen.add(src);
+                                results.push(src);
+                            }
+                        }
+                    }
+
+                    // 고해상도 URL 우선: _720, _800, _1000 접미사가 있으면 상위로
+                    results.sort((a, b) => {
+                        const hiResPattern = /_(720|800|1000)/;
+                        const aHi = hiResPattern.test(a) ? 0 : 1;
+                        const bHi = hiResPattern.test(b) ? 0 : 1;
+                        return aHi - bHi;
+                    });
 
                     return results;
                 }
@@ -310,7 +625,6 @@ class ProductReader:
                 ))
 
             if not images:
-                # 디버깅: 페이지의 모든 이미지 정보 로깅
                 debug_info = await self.page.evaluate("""
                     () => {
                         const allImgs = document.querySelectorAll('img');
@@ -323,10 +637,98 @@ class ProductReader:
                         }));
                     }
                 """)
-                logger.warning(f"이미지 0건. 페이지 내 img 태그 샘플: {debug_info}")
+                logger.warning(f"작품 이미지 0건. 페이지 내 img 태그 샘플: {debug_info}")
 
         except Exception as e:
-            logger.warning(f"이미지 추출 실패: {e}")
+            logger.warning(f"작품 이미지 추출 실패: {e}")
+        return images
+
+    async def _read_detail_images(self) -> list[ProductImage]:
+        """작품 설명 에디터 내 상세 이미지 추출 (OCR 대상)"""
+        images = []
+        try:
+            images_data = await self.page.evaluate("""
+                () => {
+                    const results = [];
+                    const seen = new Set();
+
+                    // 에디터 컨테이너 후보
+                    const editorSelectors = [
+                        '[contenteditable="true"]',
+                        '.ql-editor',
+                        '.ProseMirror',
+                        '.tiptap',
+                        '.v-textarea',
+                    ];
+
+                    let editorContainer = null;
+                    for (const sel of editorSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            editorContainer = el;
+                            break;
+                        }
+                    }
+
+                    // "작품 설명" 섹션 컨테이너도 시도
+                    if (!editorContainer) {
+                        const headers = document.querySelectorAll(
+                            'h1, h2, h3, h4, h5, h6, .v-card__title, .v-subheader, span, div, p'
+                        );
+                        for (const h of headers) {
+                            const text = h.textContent.trim();
+                            if (text.includes('작품 설명') && text.length < 30) {
+                                editorContainer = h.closest(
+                                    'section, .v-card, [class*="section"], [class*="description"]'
+                                ) || h.parentElement?.parentElement;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!editorContainer) return results;
+
+                    const imgs = editorContainer.querySelectorAll('img');
+                    for (const img of imgs) {
+                        const src = img.src || img.dataset?.src || img.getAttribute('data-src') || '';
+                        if (!src || seen.has(src)) continue;
+                        const srcLower = src.toLowerCase();
+                        if (srcLower.includes('logo') || srcLower.includes('icon')
+                            || srcLower.includes('profile') || srcLower.includes('avatar')
+                            || srcLower.includes('10x10') || srcLower.includes('favicon')
+                            || srcLower.includes('placeholder') || srcLower.includes('spinner')) {
+                            continue;
+                        }
+                        const w = img.naturalWidth || img.width || 0;
+                        const h = img.naturalHeight || img.height || 0;
+                        if (w > 0 && w < 80 && h > 0 && h < 80) continue;
+                        seen.add(src);
+                        results.push(src);
+                    }
+
+                    // 고해상도 URL 우선
+                    results.sort((a, b) => {
+                        const hiResPattern = /_(720|800|1000)/;
+                        const aHi = hiResPattern.test(a) ? 0 : 1;
+                        const bHi = hiResPattern.test(b) ? 0 : 1;
+                        return aHi - bHi;
+                    });
+
+                    return results;
+                }
+            """)
+
+            for i, src in enumerate(images_data):
+                images.append(ProductImage(
+                    url=src,
+                    order=i,
+                    is_representative=False,
+                ))
+
+            logger.info(f"상세 이미지 {len(images)}건 추출 (에디터 내)")
+
+        except Exception as e:
+            logger.warning(f"상세 이미지 추출 실패: {e}")
         return images
 
     async def _read_intro(self) -> Optional[str]:
@@ -384,15 +786,15 @@ class ProductReader:
         return steps
 
     async def _read_description(self) -> str:
-        """작품 설명 HTML 추출"""
+        """작품 설명 HTML 추출 — 수정하기 버튼 클릭 후 에디터에서 추출"""
         try:
-            # 에디터 콘텐츠 영역
+            # 에디터 콘텐츠 영역 (수정하기 클릭 후 노출)
             selectors = [
                 '[contenteditable="true"]',
-                '[class*="editor"] [class*="content"]',
-                '[class*="ql-editor"]',           # Quill editor
-                '[class*="ProseMirror"]',          # ProseMirror
-                '[class*="tiptap"]',               # Tiptap
+                '.ql-editor',                      # Quill editor
+                '.ProseMirror',                    # ProseMirror
+                '.tiptap',                         # Tiptap
+                '.v-textarea textarea',            # Vuetify textarea
                 'section:has-text("작품 설명") [class*="content"]',
             ]
             for sel in selectors:
@@ -401,20 +803,52 @@ class ProductReader:
                     html = await el.inner_html()
                     if html and len(html) > 10:
                         return html
+
+            # Fallback: 100자 이상의 textarea (설명일 가능성)
+            fallback_html = await self.page.evaluate("""
+                () => {
+                    const textareas = document.querySelectorAll('textarea');
+                    for (const ta of textareas) {
+                        if (ta.value && ta.value.length > 100) {
+                            return ta.value;
+                        }
+                    }
+                    // contenteditable div 중 긴 텍스트
+                    const editables = document.querySelectorAll('[contenteditable]');
+                    for (const el of editables) {
+                        const html = el.innerHTML;
+                        if (html && html.length > 100) {
+                            return html;
+                        }
+                    }
+                    return '';
+                }
+            """)
+            if fallback_html:
+                return fallback_html
+
         except Exception as e:
             logger.warning(f"작품 설명 추출 실패: {e}")
         return ""
 
     async def _read_options(self) -> list[DomesticOption]:
-        """옵션 목록 추출"""
+        """옵션 목록 추출 — Vuetify chip 지원 및 추가금액 파싱"""
         options = []
         try:
-            # JavaScript로 옵션 데이터 추출 — 여러 전략 시도
             options_data = await self.page.evaluate("""
                 () => {
                     const result = [];
 
-                    // 전략 1: 옵션 섹션 내 input 필드에서 추출
+                    // 추가 가격 파싱: "+1,000원", "+500원" 등
+                    function parseAdditionalPrice(text) {
+                        const match = text.match(/\\+\\s*([\\d,]+)\\s*원/);
+                        if (match) {
+                            return parseInt(match[1].replace(/,/g, ''), 10) || 0;
+                        }
+                        return 0;
+                    }
+
+                    // 전략 1: 옵션 섹션 내 input + chip/tag 기반 추출
                     const optionSections = document.querySelectorAll(
                         '[class*="option"], [class*="Option"]'
                     );
@@ -427,35 +861,91 @@ class ProductReader:
                         if (!name) continue;
 
                         const values = [];
-                        const valueEls = section.querySelectorAll(
-                            '[class*="value"] input, [class*="item"] input, [class*="chip"], [class*="tag"]'
-                        );
-                        for (const valEl of valueEls) {
-                            const val = valEl.value || valEl.textContent?.trim();
-                            if (val && val !== name && val !== 'x' && val !== '×') {
-                                values.push({
-                                    value: val,
-                                    additional_price: 0,
-                                });
+
+                        // Vuetify v-chip 기반 값 추출
+                        const chips = section.querySelectorAll('.v-chip, [class*="chip"], [class*="tag"]');
+                        for (const chip of chips) {
+                            const chipText = chip.textContent?.trim();
+                            if (!chipText || chipText === 'x' || chipText === '×'
+                                || chipText === name) continue;
+                            // 닫기 버튼 텍스트 제거
+                            const cleanText = chipText.replace(/[×x✕✖]$/g, '').trim();
+                            if (!cleanText) continue;
+                            values.push({
+                                value: String(cleanText),
+                                additional_price: parseAdditionalPrice(cleanText),
+                            });
+                        }
+
+                        // input/select 기반 값 추출
+                        if (values.length === 0) {
+                            const valueEls = section.querySelectorAll(
+                                '[class*="value"] input, [class*="item"] input'
+                            );
+                            for (const valEl of valueEls) {
+                                const val = valEl.value || valEl.textContent?.trim();
+                                if (val && val !== name && val !== 'x' && val !== '×') {
+                                    values.push({
+                                        value: String(val),
+                                        additional_price: parseAdditionalPrice(String(val)),
+                                    });
+                                }
                             }
                         }
 
                         if (values.length > 0) {
-                            result.push({ name, values, option_type: "basic" });
+                            result.push({ name: String(name), values, option_type: "basic" });
                         }
                     }
 
                     if (result.length > 0) return result;
 
-                    // 전략 2: "옵션" 텍스트 라벨 근처의 input/select 요소
+                    // 전략 2: Vuetify v-input 그룹 기반
+                    const vInputGroups = document.querySelectorAll('.v-input, .v-text-field');
+                    for (const vInput of vInputGroups) {
+                        const label = vInput.querySelector('label, .v-label');
+                        if (!label) continue;
+                        const labelText = label.textContent?.trim();
+                        if (!labelText || !labelText.includes('옵션') || labelText.length > 30) continue;
+
+                        const container = vInput.closest(
+                            '[class*="option"], [class*="Option"], [class*="row"], [class*="group"]'
+                        ) || vInput.parentElement;
+                        if (!container) continue;
+
+                        const chips = container.querySelectorAll('.v-chip');
+                        if (chips.length > 0) {
+                            const values = [];
+                            for (const chip of chips) {
+                                const text = chip.textContent?.trim().replace(/[×x✕✖]$/g, '').trim();
+                                if (text) {
+                                    values.push({
+                                        value: String(text),
+                                        additional_price: parseAdditionalPrice(text),
+                                    });
+                                }
+                            }
+                            if (values.length > 0) {
+                                result.push({
+                                    name: String(labelText.replace(/[:\\s]*$/, '')),
+                                    values,
+                                    option_type: "basic",
+                                });
+                            }
+                        }
+                    }
+
+                    if (result.length > 0) return result;
+
+                    // 전략 3: "옵션" 텍스트 라벨 근처의 input/select 요소
                     const labels = document.querySelectorAll('label, div, span, p');
                     for (const label of labels) {
                         const text = label.textContent?.trim();
                         if (!text || !text.includes('옵션') || text.length > 30) continue;
 
-                        // 형제 또는 부모 컨테이너에서 input 탐색
-                        const container = label.closest('[class*="option"], [class*="Option"], [class*="row"], [class*="group"]')
-                            || label.parentElement;
+                        const container = label.closest(
+                            '[class*="option"], [class*="Option"], [class*="row"], [class*="group"]'
+                        ) || label.parentElement;
                         if (!container) continue;
 
                         const inputs = container.querySelectorAll('input:not([type="hidden"]), select');
@@ -463,8 +953,8 @@ class ProductReader:
                             const val = input.value;
                             if (val) {
                                 result.push({
-                                    name: text.replace(/[:\\s]*$/, ''),
-                                    values: [{ value: val, additional_price: 0 }],
+                                    name: String(text.replace(/[:\\s]*$/, '')),
+                                    values: [{ value: String(val), additional_price: 0 }],
                                     option_type: "basic",
                                 });
                                 break;
@@ -472,7 +962,7 @@ class ProductReader:
                         }
                     }
 
-                    // 전략 3: 페이지의 모든 input에서 옵션 관련 필드 탐색
+                    // 전략 4: 페이지의 모든 input에서 옵션 관련 필드 탐색
                     if (result.length === 0) {
                         const allInputs = document.querySelectorAll('input');
                         for (const input of allInputs) {
@@ -482,8 +972,8 @@ class ProductReader:
                                 (placeholder + name).includes('옵션')) {
                                 if (input.value) {
                                     result.push({
-                                        name: placeholder || name || '옵션',
-                                        values: [{ value: input.value, additional_price: 0 }],
+                                        name: String(placeholder || name || '옵션'),
+                                        values: [{ value: String(input.value), additional_price: 0 }],
                                         option_type: "basic",
                                     });
                                 }
@@ -500,7 +990,7 @@ class ProductReader:
                     name=opt_data["name"],
                     values=[
                         OptionValue(
-                            value=v["value"],
+                            value=str(v["value"]),
                             additional_price=v.get("additional_price", 0),
                         )
                         for v in opt_data["values"]
@@ -509,17 +999,22 @@ class ProductReader:
                 ))
 
             if not options:
-                # 디버깅: 옵션 관련 DOM 정보 로깅
                 debug_info = await self.page.evaluate("""
                     () => {
                         const optionEls = document.querySelectorAll('[class*="option"], [class*="Option"]');
+                        const chipEls = document.querySelectorAll('.v-chip');
                         return {
                             optionElementCount: optionEls.length,
+                            chipCount: chipEls.length,
                             samples: Array.from(optionEls).slice(0, 5).map(el => ({
                                 tag: el.tagName,
                                 classes: el.className?.toString().substring(0, 100),
                                 inputCount: el.querySelectorAll('input').length,
+                                chipCount: el.querySelectorAll('.v-chip').length,
                                 text: el.textContent?.trim().substring(0, 100),
+                            })),
+                            chipSamples: Array.from(chipEls).slice(0, 10).map(el => ({
+                                text: el.textContent?.trim().substring(0, 80),
                             })),
                         };
                     }
@@ -537,12 +1032,22 @@ class ProductReader:
                 () => {
                     // 키워드 태그 요소 또는 키워드 입력 필드
                     const tags = document.querySelectorAll(
-                        '[class*="keyword"] [class*="tag"], [class*="keyword"] span, [class*="chip"]'
+                        '[class*="keyword"] [class*="tag"], [class*="keyword"] span, [class*="keyword"] .v-chip'
                     );
                     if (tags.length > 0) {
                         return Array.from(tags)
                             .map(t => t.textContent.trim())
                             .filter(t => t && t !== 'x' && t !== '×');
+                    }
+
+                    // Vuetify chip 기반 키워드
+                    const chipTags = document.querySelectorAll(
+                        '[class*="keyword"] .v-chip, [class*="tag"] .v-chip'
+                    );
+                    if (chipTags.length > 0) {
+                        return Array.from(chipTags)
+                            .map(t => t.textContent.trim().replace(/[×x✕✖]$/g, '').trim())
+                            .filter(Boolean);
                     }
 
                     // 키워드 input 필드

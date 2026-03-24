@@ -9,6 +9,7 @@ import {
   type DomesticProduct,
   type GlobalProductData,
   type LanguageData,
+  type ImageText,
 } from '@/lib/api-v2'
 import {
   ArrowLeft,
@@ -237,7 +238,26 @@ export default function ProductDetailPage() {
         setTranslateError(result.message || '번역 실패: 결과를 받지 못했습니다.')
       }
     } catch (err) {
-      setTranslateError(getErrorMessage(err))
+      const errMsg = getErrorMessage(err)
+      // 503 에러 시 5초 후 1회 자동 재시도
+      if (errMsg.includes('503')) {
+        setTranslateMessage('번역기 초기화 중... 잠시 후 재시도합니다')
+        await new Promise((resolve) => setTimeout(resolve, 5000))
+        setTranslateMessage('')
+        try {
+          const retryResult = await translatePreview(productId)
+          if (retryResult.success && retryResult.global_data) {
+            setGlobalData(retryResult.global_data)
+            setTranslateMessage(retryResult.message || '번역 완료')
+          } else {
+            setTranslateError(retryResult.message || '번역 실패: 결과를 받지 못했습니다.')
+          }
+        } catch (retryErr) {
+          setTranslateError(getErrorMessage(retryErr))
+        }
+      } else {
+        setTranslateError(errMsg)
+      }
     } finally {
       setTranslateLoading(false)
     }
@@ -355,8 +375,8 @@ export default function ProductDetailPage() {
           </h2>
 
           {/* 이미지 */}
-          {domestic?.product_images && domestic.product_images.length > 0 && (
-            <Section title="작품 이미지" icon={ImageIcon}>
+          <Section title="작품 이미지" icon={ImageIcon}>
+            {domestic?.product_images && domestic.product_images.length > 0 ? (
               <div className="grid grid-cols-3 gap-2">
                 {domestic.product_images.map((img, i) => (
                   <div
@@ -368,6 +388,28 @@ export default function ProductDetailPage() {
                     <img
                       src={img.url}
                       alt={`작품 이미지 ${i + 1}`}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-400">(이미지를 추출하지 못했습니다)</p>
+            )}
+          </Section>
+
+          {/* 설명 이미지 */}
+          {domestic?.detail_images && domestic.detail_images.length > 0 && (
+            <Section title="설명 이미지" icon={ImageIcon} defaultOpen={false}>
+              <div className="grid grid-cols-4 gap-2 max-h-60 overflow-y-auto">
+                {domestic.detail_images.map((img, i) => (
+                  <div
+                    key={i}
+                    className="aspect-square rounded-lg overflow-hidden border"
+                  >
+                    <img
+                      src={img.url}
+                      alt={`설명 이미지 ${i + 1}`}
                       className="w-full h-full object-cover"
                     />
                   </div>
@@ -391,7 +433,15 @@ export default function ProductDetailPage() {
               </div>
               <div className="flex">
                 <dt className="w-24 text-gray-500 shrink-0">재고</dt>
-                <dd className="text-gray-900">{domestic?.quantity}개</dd>
+                <dd className="text-gray-900 flex items-center gap-1.5">
+                  {domestic?.quantity}개
+                  {domestic && domestic.quantity === domestic.price && (
+                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-yellow-50 border border-yellow-300 rounded text-xs text-yellow-700">
+                      <AlertTriangle className="w-3 h-3" />
+                      (확인 필요)
+                    </span>
+                  )}
+                </dd>
               </div>
               {domestic?.keywords && domestic.keywords.length > 0 && (
                 <div className="flex">
@@ -412,16 +462,18 @@ export default function ProductDetailPage() {
           </Section>
 
           {/* 작품 설명 */}
-          {domestic?.description_html && (
-            <Section title="작품 설명" icon={FileText} defaultOpen={false}>
+          <Section title="작품 설명" icon={FileText} defaultOpen={false}>
+            {domestic?.description_html ? (
               <div
                 className="prose prose-sm max-w-none text-gray-700"
                 dangerouslySetInnerHTML={{
                   __html: domestic.description_html,
                 }}
               />
-            </Section>
-          )}
+            ) : (
+              <p className="text-sm text-gray-400">(작품 설명 없음)</p>
+            )}
+          </Section>
 
           {/* 옵션 */}
           {domestic?.options && domestic.options.length > 0 && (
@@ -433,16 +485,21 @@ export default function ProductDetailPage() {
                       {opt.name}
                     </p>
                     <div className="flex flex-wrap gap-1 mt-1">
-                      {opt.values.map((v, j) => (
+                      {opt.values.map((v, j) => {
+                        const vAny = v as unknown as Record<string, unknown>
+                        const displayValue = typeof v === 'object' && v !== null ? (String(vAny.value || '') || JSON.stringify(v)) : String(v)
+                        const additionalPrice = typeof v === 'object' && v !== null ? Number(vAny.additional_price || 0) : 0
+                        return (
                         <span
                           key={j}
                           className="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600"
                         >
-                          {v.value}
-                          {v.additional_price > 0 &&
-                            ` (+${v.additional_price.toLocaleString()}원)`}
+                          {String(displayValue)}
+                          {typeof additionalPrice === 'number' && additionalPrice > 0 &&
+                            ` (+${additionalPrice.toLocaleString()}원)`}
                         </span>
-                      ))}
+                        )
+                      })}
                     </div>
                   </div>
                 ))}
@@ -531,6 +588,54 @@ export default function ProductDetailPage() {
               onChange={(updated) => updateLangData(activeLang, updated)}
             />
           </div>
+
+          {/* 이미지 내 텍스트 */}
+          {globalData && (() => {
+            const imageTexts = activeLang === 'en'
+              ? globalData.en?.image_texts
+              : globalData.ja?.image_texts
+            if (!imageTexts || imageTexts.length === 0) return null
+            return (
+              <Section title="이미지 내 텍스트" icon={ImageIcon} defaultOpen={false}>
+                <div className="space-y-3">
+                  {imageTexts.map((item: ImageText, i: number) => (
+                    <div key={i} className="flex gap-3 items-start">
+                      <div className="w-12 h-12 rounded border overflow-hidden shrink-0 bg-gray-100">
+                        <img
+                          src={item.image_url}
+                          alt={`이미지 ${item.order_index}`}
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        {item.original_text ? (
+                          <>
+                            <p className="text-xs text-gray-400 mb-1 truncate">{item.original_text}</p>
+                            <textarea
+                              value={item.translated_text}
+                              onChange={(e) => {
+                                if (!globalData[activeLang]) return
+                                const updatedTexts = [...(globalData[activeLang]!.image_texts)]
+                                updatedTexts[i] = { ...updatedTexts[i], translated_text: e.target.value }
+                                updateLangData(activeLang, {
+                                  ...globalData[activeLang]!,
+                                  image_texts: updatedTexts,
+                                })
+                              }}
+                              rows={1}
+                              className="w-full px-2 py-1 border rounded text-xs focus:ring-1 focus:ring-orange-500 outline-none resize-y"
+                            />
+                          </>
+                        ) : (
+                          <p className="text-xs text-gray-400">(텍스트 없음)</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )
+          })()}
 
           {/* 글로벌 옵션 */}
           {globalData?.global_options &&

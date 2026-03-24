@@ -244,6 +244,13 @@ function ProductCard({
 // ──────────── Main Dashboard ────────────
 export default function V2DashboardPage() {
   const router = useRouter()
+  const [isDebug, setIsDebug] = useState(false)
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setIsDebug(new URLSearchParams(window.location.search).get('debug') === 'true')
+    }
+  }, [])
   const [session, setSession] = useState<SessionStatus | null>(null)
   const [checkingSession, setCheckingSession] = useState(true)
   const [products, setProducts] = useState<ProductSummary[]>([])
@@ -253,6 +260,8 @@ export default function V2DashboardPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [batchLoading, setBatchLoading] = useState(false)
   const [batchResult, setBatchResult] = useState<string | null>(null)
+  const [debugInfo, setDebugInfo] = useState<Record<string, unknown> | null>(null)
+  const [debugOpen, setDebugOpen] = useState(false)
 
   // 세션 확인
   useEffect(() => {
@@ -270,6 +279,7 @@ export default function V2DashboardPage() {
     try {
       const result = await getProductList(statusFilter)
       setProducts(result.products || [])
+      setDebugInfo(result.debug_info ?? null)
     } catch (err) {
       console.error('작품 목록 로드 실패:', err)
     } finally {
@@ -483,6 +493,28 @@ export default function V2DashboardPage() {
       {batchResult && (
         <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
           {batchResult}
+        </div>
+      )}
+
+      {/* 디버그 패널 */}
+      {isDebug && debugInfo && (
+        <div className="mt-6 border border-gray-300 rounded-lg overflow-hidden">
+          <button
+            onClick={() => setDebugOpen(!debugOpen)}
+            className="w-full flex items-center justify-between px-4 py-2 bg-gray-100 hover:bg-gray-200 transition-colors text-sm font-medium text-gray-600"
+          >
+            <span>Debug Info</span>
+            {debugOpen ? (
+              <ChevronRight className="w-4 h-4 rotate-90" />
+            ) : (
+              <ChevronRight className="w-4 h-4" />
+            )}
+          </button>
+          {debugOpen && (
+            <pre className="p-4 text-xs text-gray-700 bg-gray-50 overflow-auto max-h-80">
+              {JSON.stringify(debugInfo, null, 2)}
+            </pre>
+          )}
         </div>
       )}
     </div>

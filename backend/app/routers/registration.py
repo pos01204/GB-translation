@@ -18,13 +18,29 @@ router = APIRouter(prefix="/api/v2/register", tags=["V2 - Registration"])
 # 전역 참조 (main.py에서 주입)
 _artist_session = None
 _gb_translator = None
+_initialize_services = None
 
 
-def configure(artist_session, gb_translator):
+def configure(artist_session, gb_translator, initialize_fn=None):
     """main.py에서 의존성 주입"""
-    global _artist_session, _gb_translator
+    global _artist_session, _gb_translator, _initialize_services
     _artist_session = artist_session
-    _gb_translator = gb_translator
+    if gb_translator is not None:
+        _gb_translator = gb_translator
+    if initialize_fn is not None:
+        _initialize_services = initialize_fn
+
+
+async def _ensure_translator():
+    """번역기가 초기화되지 않았으면 초기화 실행"""
+    global _gb_translator
+    if _gb_translator is not None:
+        return True
+    if _initialize_services:
+        logger.info("번역기 미초기화 — v1 서비스 초기화 실행...")
+        await _initialize_services()
+        return _gb_translator is not None
+    return False
 
 
 # ──────────────── Request/Response Models ────────────────
@@ -83,7 +99,8 @@ async def register_single(request: RegisterSingleRequest):
 
         # global_data가 없으면 번역 파이프라인 실행
         if not global_data:
-            if not _gb_translator:
+            translator_ready = await _ensure_translator()
+            if not translator_ready:
                 raise HTTPException(
                     status_code=503, detail="번역기가 초기화되지 않았습니다"
                 )
@@ -167,7 +184,8 @@ async def register_batch(request: RegisterBatchRequest):
     """
     if not _artist_session:
         raise HTTPException(status_code=503, detail="세션이 초기화되지 않았습니다")
-    if not _gb_translator:
+    translator_ready = await _ensure_translator()
+    if not translator_ready:
         raise HTTPException(status_code=503, detail="번역기가 초기화되지 않았습니다")
     if not await _artist_session.is_authenticated():
         raise HTTPException(status_code=401, detail="로그인이 필요합니다")

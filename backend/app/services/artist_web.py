@@ -35,6 +35,7 @@ class ArtistWebSession:
         self.page: Optional[Page] = None
         self._authenticated = False
         self._initialized = False
+        self._last_api_raw_sample: dict | None = None
 
     async def initialize(self):
         """Playwright 브라우저 초기화"""
@@ -422,6 +423,8 @@ class ArtistWebSession:
         """API 응답의 작품 배열을 ProductSummary 리스트로 변환"""
         if not items:
             return []
+
+        self._last_api_raw_sample = items[0] if items else None
 
         # 첫 아이템의 전체 구조를 로깅 (필드명 파악용)
         first_item = items[0] if items else {}

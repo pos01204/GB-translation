@@ -31,6 +31,7 @@ class ProductListResponse(BaseModel):
     message: str
     products: list[ProductSummary] = []
     total_count: int = 0
+    debug_info: Optional[dict] = None
 
 
 class DomesticProductResponse(BaseModel):
@@ -58,11 +59,13 @@ async def get_product_list(
 
     try:
         products = await _artist_session.get_product_list(status=status)
+        debug_info = _artist_session._last_api_raw_sample
         return ProductListResponse(
             success=True,
             message=f"{len(products)}개 작품을 조회했습니다",
             products=products,
             total_count=len(products),
+            debug_info=debug_info,
         )
     except Exception as e:
         logger.error(f"작품 목록 조회 실패: {e}")

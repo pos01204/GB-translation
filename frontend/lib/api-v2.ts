@@ -16,6 +16,13 @@ const API_V2_BASE = `${getApiBaseUrl()}/api/v2`
 
 // ============ Types ============
 
+export interface ImageText {
+  image_url: string
+  original_text: string
+  translated_text: string
+  order_index: number
+}
+
 export interface LoginRequest {
   email: string
   password: string
@@ -71,6 +78,7 @@ export interface DomesticProduct {
   gift_wrapping: boolean
   status: string
   global_status: string
+  detail_images: ProductImage[]
 }
 
 export interface LanguageData {
@@ -78,6 +86,7 @@ export interface LanguageData {
   description_html: string
   keywords: string[]
   use_domestic_images: boolean
+  image_texts: ImageText[]
 }
 
 export interface GlobalOption {
@@ -160,7 +169,7 @@ export async function logoutArtistWeb(): Promise<void> {
 
 export async function getProductList(
   status: string = 'selling'
-): Promise<{ success: boolean; message: string; products: ProductSummary[]; total_count: number }> {
+): Promise<{ success: boolean; message: string; products: ProductSummary[]; total_count: number; debug_info?: Record<string, unknown> | null }> {
   const response = await fetch(`${API_V2_BASE}/products/?status=${status}`)
   if (!response.ok) {
     const err = await response.json().catch(() => ({}))

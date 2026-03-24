@@ -71,6 +71,7 @@ class DomesticProduct(BaseModel):
 
     # 이미지
     product_images: list[ProductImage] = []
+    detail_images: list[ProductImage] = []       # 작품 설명 내 상세 이미지 (OCR 대상)
 
     # 상세 설명 영역
     intro: Optional[str] = None                 # 작품 인트로 (100자)

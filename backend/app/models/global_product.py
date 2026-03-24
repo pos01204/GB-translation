@@ -5,6 +5,14 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 
+class ImageText(BaseModel):
+    """이미지 내 텍스트 OCR + 번역 결과"""
+    image_url: str
+    original_text: str = ""        # 추출된 한국어 텍스트
+    translated_text: str = ""      # 번역된 텍스트
+    order_index: int = 0           # 이미지 순서
+
+
 class LanguageData(BaseModel):
     """언어별 글로벌 등록 데이터"""
     title: str = Field(max_length=80)           # 글로벌 작품명
@@ -12,6 +20,7 @@ class LanguageData(BaseModel):
     keywords: list[str] = []                    # 작품 키워드
     use_domestic_images: bool = True            # 국내 이미지 불러오기 사용
     custom_image_urls: list[str] = []           # 별도 이미지 URL
+    image_texts: list[ImageText] = []           # 이미지 내 텍스트 OCR + 번역 결과
 
 
 class GlobalOption(BaseModel):
