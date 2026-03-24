@@ -57,3 +57,37 @@ async def debug_page_info():
     except Exception as e:
         logger.error(f"디버그 정보 수집 실패: {e}")
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/api-response", summary="idus API 원본 응답 확인")
+async def debug_api_response():
+    """
+    artist-aggregator.idus.com API를 직접 호출하고 원본 응답을 반환합니다.
+    작품 데이터 필드명 파악용.
+    """
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화 또는 페이지 없음"}
+
+    try:
+        api_url = "https://artist-aggregator.idus.com/api/v1/product/public/sale/paging?page=0&sort=&query=&management_category_id=0"
+        raw = await _artist_session.page.evaluate("""
+            async (url) => {
+                try {
+                    const resp = await fetch(url, {
+                        method: 'GET',
+                        credentials: 'include',
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    if (!resp.ok) return { error: `HTTP ${resp.status}` };
+                    const data = await resp.json();
+                    // 첫 2개 아이템만 반환 (전체 응답이 너무 클 수 있음)
+                    return { ok: true, raw_keys: Object.keys(data), data: data };
+                } catch (e) {
+                    return { error: e.message };
+                }
+            }
+        """, api_url)
+        return {"success": True, "api_response": raw}
+    except Exception as e:
+        logger.error(f"API 디버그 실패: {e}")
+        return {"success": False, "error": str(e)}
