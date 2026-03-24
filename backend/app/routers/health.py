@@ -613,3 +613,107 @@ async def debug_option_modal():
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/test-option-reader", summary="ProductReader 옵션 코드 직접 테스트")
+async def debug_test_option_reader():
+    """ProductReader._read_options_from_modal()과 동일한 코드를 실행하여 결과 확인"""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    page = _artist_session.page
+    result = {"currentUrl": page.url, "steps": []}
+
+    try:
+        # 1단계: JS evaluate로 옵션 버튼 텍스트 목록 추출
+        option_names = await page.evaluate("""
+            () => {
+                const names = [];
+                const selectors = [
+                    '[class*="ProductFormOptionSection"] button',
+                    '[class*="optionItem"] button',
+                    '[class*="OptionItem"] button',
+                ];
+                for (const sel of selectors) {
+                    const btns = document.querySelectorAll(sel);
+                    for (const btn of btns) {
+                        const text = btn.textContent?.trim();
+                        if (text && text.length > 0 && text.length < 30
+                            && !names.includes(text)) {
+                            names.push(text);
+                        }
+                    }
+                    if (names.length > 0) break;
+                }
+                return names;
+            }
+        """)
+        result["steps"].append({"step": "find_names", "option_names": option_names})
+
+        if not option_names:
+            result["steps"].append({"step": "no_options", "message": "옵션 없음"})
+            return {"success": True, "data": result}
+
+        # 2단계: 각 옵션 클릭 + 모달 읽기
+        for opt_name in option_names:
+            step_data = {"option_name": opt_name}
+
+            el = page.locator(f'text="{opt_name}"').first
+            el_count = await el.count()
+            step_data["locator_count"] = el_count
+
+            if el_count == 0:
+                step_data["error"] = "locator not found"
+                result["steps"].append(step_data)
+                continue
+
+            await el.click()
+            await asyncio.sleep(1.5)
+            step_data["clicked"] = True
+
+            # 모달 읽기
+            modal_data = await page.evaluate("""
+                () => {
+                    const modal = document.querySelector('.v-dialog--active');
+                    if (!modal) return { error: 'no_modal' };
+
+                    const nameInput = modal.querySelector('input[name="productOptionName"]');
+                    const optionName = nameInput ? nameInput.value.trim() : '';
+
+                    const valueInputs = Array.from(
+                        modal.querySelectorAll('input[name="productOptionValue"]')
+                    );
+                    const priceInputs = Array.from(
+                        modal.querySelectorAll('input[name="optionPrice"]')
+                    );
+
+                    const values = [];
+                    for (let i = 0; i < valueInputs.length; i++) {
+                        const val = valueInputs[i].value.trim();
+                        if (!val) continue;
+                        const price = priceInputs[i]
+                            ? parseInt(priceInputs[i].value.replace(/[^0-9]/g, ''), 10) || 0
+                            : 0;
+                        values.push({ value: val, additional_price: price });
+                    }
+
+                    return { name: optionName, values: values };
+                }
+            """)
+            step_data["modal_data"] = modal_data
+
+            # 모달 닫기
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
+            result["steps"].append(step_data)
+
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        result["error"] = str(e)
+        return {"success": False, "data": result}

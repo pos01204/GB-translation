@@ -302,81 +302,111 @@ class ProductReader:
         return product
 
     async def _read_options_from_modal(self) -> list[DomesticOption]:
-        """옵션 버튼을 클릭 → 모달에서 name 속성으로 옵션명/값/추가금액 읽기
+        """옵션 모달에서 옵션명/값/추가금액 읽기
 
-        디버그 엔드포인트(/api/debug/option-modal)와 동일한 로직 사용.
+        /api/debug/option-modal에서 검증된 로직을 그대로 사용:
+        1. JS evaluate로 옵션 버튼 텍스트 추출
+        2. text="옵션명" 로케이터로 클릭 (검증됨)
+        3. .v-dialog--active 모달에서 name 속성으로 input 읽기
         """
         options = []
         try:
-            # DOM 렌더링 대기
-            await asyncio.sleep(2)
+            # 1단계: JS evaluate로 옵션 버튼 텍스트 목록 추출
+            option_names = await self.page.evaluate("""
+                () => {
+                    const names = [];
+                    // ProductFormOptionSection 내의 버튼 텍스트
+                    const selectors = [
+                        '[class*="ProductFormOptionSection"] button',
+                        '[class*="optionItem"] button',
+                        '[class*="OptionItem"] button',
+                    ];
+                    for (const sel of selectors) {
+                        const btns = document.querySelectorAll(sel);
+                        for (const btn of btns) {
+                            const text = btn.textContent?.trim();
+                            if (text && text.length > 0 && text.length < 30
+                                && !names.includes(text)) {
+                                names.push(text);
+                            }
+                        }
+                        if (names.length > 0) break;
+                    }
+                    return names;
+                }
+            """)
 
-            # Playwright 로케이터로 옵션 버튼 찾기 (자동 대기)
-            option_buttons = self.page.locator(
-                '[class*="optionItem"] button, [class*="OptionItem"] button'
-            )
-            count = await option_buttons.count()
-            logger.info(f"[옵션 모달] optionItem 버튼 {count}개 발견")
+            logger.info(f"[옵션 모달] 옵션 이름 발견: {option_names}")
 
-            if count == 0:
-                # 폴백: 모든 BaseButton 중 option 부모를 가진 것
-                option_buttons = self.page.locator(
-                    '.BaseButton'
-                )
-                all_count = await option_buttons.count()
-                # option 관련 부모를 가진 버튼만 필터링
-                valid_indices = []
-                for i in range(all_count):
-                    btn = option_buttons.nth(i)
-                    parent_class = await btn.evaluate(
-                        "el => el.closest('[class*=\"option\"], [class*=\"Option\"]')?.className || ''"
-                    )
-                    if parent_class:
-                        valid_indices.append(i)
-                count = len(valid_indices)
-                logger.info(f"[옵션 모달] BaseButton 폴백: {count}개")
+            if not option_names:
+                logger.info("[옵션 모달] 옵션 없음")
+                return []
 
-            for i in range(count):
+            # 2단계: 각 옵션을 text= 로케이터로 클릭 → 모달 읽기
+            # (디버그 엔드포인트에서 text="디자인" 방식이 검증됨)
+            for opt_name in option_names:
                 try:
-                    btn = option_buttons.nth(i)
-                    btn_text = (await btn.inner_text()).strip()
-                    if not btn_text or len(btn_text) > 30:
+                    el = self.page.locator(f'text="{opt_name}"').first
+                    if await el.count() == 0:
+                        logger.warning(f"[옵션 모달] '{opt_name}' 못찾음")
                         continue
 
-                    logger.info(f"[옵션 모달] 버튼 클릭: '{btn_text}'")
-                    await btn.click()
+                    logger.info(f"[옵션 모달] 클릭: '{opt_name}'")
+                    await el.click()
                     await asyncio.sleep(1.5)
 
-                    # 모달에서 데이터 읽기 (확정된 name 속성)
+                    # 3단계: 모달 읽기 (확정된 name 속성)
                     modal_data = await self.page.evaluate("""
                         () => {
                             const modal = document.querySelector('.v-dialog--active');
-                            if (!modal) return null;
+                            if (!modal) return { error: 'no_modal' };
 
-                            const nameInput = modal.querySelector('input[name="productOptionName"]');
-                            const optionName = nameInput ? nameInput.value.trim() : '';
+                            const nameInput = modal.querySelector(
+                                'input[name="productOptionName"]'
+                            );
+                            const optionName = nameInput
+                                ? nameInput.value.trim() : '';
 
-                            const valueInputs = Array.from(modal.querySelectorAll('input[name="productOptionValue"]'));
-                            const priceInputs = Array.from(modal.querySelectorAll('input[name="optionPrice"]'));
+                            const valueInputs = Array.from(
+                                modal.querySelectorAll(
+                                    'input[name="productOptionValue"]'
+                                )
+                            );
+                            const priceInputs = Array.from(
+                                modal.querySelectorAll(
+                                    'input[name="optionPrice"]'
+                                )
+                            );
 
                             const values = [];
                             for (let i = 0; i < valueInputs.length; i++) {
                                 const val = valueInputs[i].value.trim();
                                 if (!val) continue;
                                 const price = priceInputs[i]
-                                    ? parseInt(priceInputs[i].value.replace(/[^0-9]/g, ''), 10) || 0
+                                    ? parseInt(
+                                        priceInputs[i].value.replace(
+                                            /[^0-9]/g, ''
+                                        ), 10
+                                      ) || 0
                                     : 0;
-                                values.push({ value: val, additional_price: price });
+                                values.push({
+                                    value: val,
+                                    additional_price: price,
+                                });
                             }
 
                             return { name: optionName, values: values };
                         }
                     """)
 
-                    if modal_data and modal_data.get("name"):
+                    logger.info(f"[옵션 모달] 결과: {modal_data}")
+
+                    if (modal_data
+                            and modal_data.get("name")
+                            and not modal_data.get("error")):
                         opt_values = [
                             OptionValue(
-                                value=v.get("value", ""),
+                                value=v["value"],
                                 additional_price=v.get("additional_price", 0),
                             )
                             for v in modal_data.get("values", [])
@@ -388,18 +418,16 @@ class ProductReader:
                             option_type="basic",
                         ))
                         logger.info(
-                            f"[옵션 모달] 추출 성공: {modal_data['name']} "
+                            f"[옵션 모달] 성공: {modal_data['name']} "
                             f"({len(opt_values)}개 값)"
                         )
-                    else:
-                        logger.warning(f"[옵션 모달] 모달 데이터 없음: {modal_data}")
 
                     # 모달 닫기 (ESC)
                     await self.page.keyboard.press("Escape")
                     await asyncio.sleep(0.5)
 
                 except Exception as e:
-                    logger.warning(f"[옵션 모달] 옵션 처리 실패: {e}")
+                    logger.warning(f"[옵션 모달] '{opt_name}' 실패: {e}")
                     try:
                         await self.page.keyboard.press("Escape")
                         await asyncio.sleep(0.5)
