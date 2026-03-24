@@ -21,12 +21,14 @@ import {
   AlertTriangle,
   CheckCircle2,
   XCircle,
+  X,
   Image as ImageIcon,
   Tag,
   FileText,
   ChevronDown,
   ChevronUp,
   RefreshCw,
+  Eye,
 } from 'lucide-react'
 
 // ──────────── Collapsible Section ────────────
@@ -63,93 +65,312 @@ function Section({
   )
 }
 
-// ──────────── Language Tab Content ────────────
-function LanguagePanel({
-  lang,
-  langData,
-  onChange,
+// ──────────── Translation Modal ────────────
+function TranslationModal({
+  isOpen,
+  onClose,
+  productTitle,
+  globalData,
+  activeLang,
+  setActiveLang,
+  updateLangData,
+  handleRegister,
+  registerLoading,
+  registerResult,
 }: {
-  lang: 'en' | 'ja'
-  langData: LanguageData | null
-  onChange: (updated: LanguageData) => void
+  isOpen: boolean
+  onClose: () => void
+  productTitle: string
+  globalData: GlobalProductData
+  activeLang: 'en' | 'ja'
+  setActiveLang: (lang: 'en' | 'ja') => void
+  updateLangData: (lang: 'en' | 'ja', updated: LanguageData) => void
+  handleRegister: (saveAsDraft: boolean) => void
+  registerLoading: boolean
+  registerResult: { success: boolean; message: string } | null
 }) {
-  if (!langData) {
-    return (
-      <div className="text-center py-8 text-gray-400">
-        <Languages className="w-8 h-8 mx-auto mb-2" />
-        <p className="text-sm">번역 미리보기를 실행하세요</p>
-      </div>
-    )
-  }
+  // ESC key listener
+  useEffect(() => {
+    if (!isOpen) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isOpen, onClose])
+
+  if (!isOpen) return null
+
+  const langData = globalData[activeLang] || null
+  const imageTexts = langData?.image_texts || []
 
   return (
-    <div className="space-y-4">
-      {/* 작품명 */}
-      <div>
-        <label className="block text-xs font-medium text-gray-500 mb-1">
-          작품명 ({langData.title.length}/80)
-        </label>
-        <input
-          type="text"
-          value={langData.title}
-          onChange={(e) =>
-            onChange({ ...langData, title: e.target.value.slice(0, 80) })
-          }
-          maxLength={80}
-          className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-orange-500 outline-none ${
-            langData.title.length > 80
-              ? 'border-red-300 focus:ring-red-500'
-              : ''
-          }`}
-        />
-      </div>
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-start justify-center p-4 pt-[5vh]">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b shrink-0">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-lg font-bold text-gray-900 truncate">{productTitle}</h2>
+            <p className="text-xs text-gray-400 mt-0.5">번역 결과 편집</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 rounded-lg hover:bg-gray-100 transition-colors ml-4"
+          >
+            <X className="w-5 h-5 text-gray-500" />
+          </button>
+        </div>
 
-      {/* 키워드 */}
-      <div>
-        <label className="block text-xs font-medium text-gray-500 mb-1">
-          키워드 ({langData.keywords.length}개)
-        </label>
-        <input
-          type="text"
-          value={langData.keywords.join(', ')}
-          onChange={(e) =>
-            onChange({
-              ...langData,
-              keywords: e.target.value
-                .split(',')
-                .map((k) => k.trim())
-                .filter(Boolean),
-            })
-          }
-          placeholder="keyword1, keyword2, ..."
-          className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-orange-500 outline-none"
-        />
-      </div>
+        {/* Language Tabs */}
+        <div className="px-6 pt-4 shrink-0">
+          <div className="flex rounded-lg border overflow-hidden">
+            <button
+              onClick={() => setActiveLang('en')}
+              className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
+                activeLang === 'en'
+                  ? 'bg-orange-500 text-white'
+                  : 'bg-white text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              English
+            </button>
+            <button
+              onClick={() => setActiveLang('ja')}
+              className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
+                activeLang === 'ja'
+                  ? 'bg-orange-500 text-white'
+                  : 'bg-white text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              日本語
+            </button>
+          </div>
+        </div>
 
-      {/* 설명 HTML */}
-      <div>
-        <label className="block text-xs font-medium text-gray-500 mb-1">
-          작품 설명 (HTML)
-        </label>
-        <textarea
-          value={langData.description_html}
-          onChange={(e) =>
-            onChange({ ...langData, description_html: e.target.value })
-          }
-          rows={8}
-          className="w-full px-3 py-2 border rounded-lg text-sm font-mono focus:ring-2 focus:ring-orange-500 outline-none resize-y"
-        />
-      </div>
+        {/* Scrollable Body */}
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+          {/* 2-column layout on large screens */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Left: Title, Keywords, Description */}
+            <div className="space-y-4">
+              {/* 작품명 */}
+              {langData && (
+                <>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">
+                      작품명 ({langData.title.length}/80)
+                    </label>
+                    <input
+                      type="text"
+                      value={langData.title}
+                      onChange={(e) =>
+                        updateLangData(activeLang, { ...langData, title: e.target.value.slice(0, 80) })
+                      }
+                      maxLength={80}
+                      className={`w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-orange-500 outline-none ${
+                        langData.title.length > 80
+                          ? 'border-red-300 focus:ring-red-500'
+                          : ''
+                      }`}
+                    />
+                  </div>
 
-      {/* 설명 미리보기 */}
-      <div>
-        <label className="block text-xs font-medium text-gray-500 mb-1">
-          미리보기
-        </label>
-        <div
-          className="p-3 border rounded-lg text-sm bg-white prose prose-sm max-w-none"
-          dangerouslySetInnerHTML={{ __html: langData.description_html }}
-        />
+                  {/* 키워드 */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">
+                      키워드 ({langData.keywords.length}개)
+                    </label>
+                    <input
+                      type="text"
+                      value={langData.keywords.join(', ')}
+                      onChange={(e) =>
+                        updateLangData(activeLang, {
+                          ...langData,
+                          keywords: e.target.value
+                            .split(',')
+                            .map((k) => k.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      placeholder="keyword1, keyword2, ..."
+                      className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-orange-500 outline-none"
+                    />
+                  </div>
+
+                  {/* 설명 HTML */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">
+                      작품 설명 (HTML)
+                    </label>
+                    <textarea
+                      value={langData.description_html}
+                      onChange={(e) =>
+                        updateLangData(activeLang, { ...langData, description_html: e.target.value })
+                      }
+                      rows={8}
+                      className="w-full px-3 py-2 border rounded-lg text-sm font-mono focus:ring-2 focus:ring-orange-500 outline-none resize-y"
+                    />
+                  </div>
+
+                  {/* 설명 미리보기 */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">
+                      미리보기
+                    </label>
+                    <div
+                      className="p-3 border rounded-lg text-sm bg-white prose prose-sm max-w-none"
+                      dangerouslySetInnerHTML={{ __html: langData.description_html }}
+                    />
+                  </div>
+                </>
+              )}
+              {!langData && (
+                <div className="text-center py-8 text-gray-400">
+                  <Languages className="w-8 h-8 mx-auto mb-2" />
+                  <p className="text-sm">번역 데이터가 없습니다</p>
+                </div>
+              )}
+            </div>
+
+            {/* Right: Image texts */}
+            <div className="space-y-4">
+              {imageTexts.length > 0 && (
+                <Section title={`이미지 내 텍스트 (${imageTexts.length}개)`} icon={ImageIcon} defaultOpen={true}>
+                  <div className="space-y-4">
+                    {imageTexts.map((item: ImageText, i: number) => (
+                      <div key={i} className="border rounded-lg p-3 bg-white">
+                        {/* 이미지 비교: 원본 ↔ 번역 */}
+                        <div className="flex gap-3 mb-2">
+                          <div className="flex-1">
+                            <p className="text-[10px] text-gray-400 mb-1">원본</p>
+                            <div className="rounded border overflow-hidden bg-gray-100 aspect-video">
+                              <img
+                                src={item.image_url}
+                                alt={`원본 ${item.order_index + 1}`}
+                                className="w-full h-full object-contain"
+                              />
+                            </div>
+                          </div>
+                          {item.translated_image_base64 && (
+                            <div className="flex-1">
+                              <p className="text-[10px] text-orange-500 mb-1">번역</p>
+                              <div className="rounded border border-orange-200 overflow-hidden bg-gray-100 aspect-video">
+                                <img
+                                  src={`data:image/png;base64,${item.translated_image_base64}`}
+                                  alt={`번역 ${item.order_index + 1}`}
+                                  className="w-full h-full object-contain"
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        {/* 텍스트 */}
+                        {item.original_text ? (
+                          <div className="space-y-1">
+                            <p className="text-xs text-gray-400 line-clamp-2">{item.original_text}</p>
+                            <textarea
+                              value={item.translated_text}
+                              onChange={(e) => {
+                                if (!globalData[activeLang]) return
+                                const updatedTexts = [...(globalData[activeLang]!.image_texts)]
+                                updatedTexts[i] = { ...updatedTexts[i], translated_text: e.target.value }
+                                updateLangData(activeLang, {
+                                  ...globalData[activeLang]!,
+                                  image_texts: updatedTexts,
+                                })
+                              }}
+                              rows={2}
+                              className="w-full px-2 py-1 border rounded text-xs focus:ring-1 focus:ring-orange-500 outline-none resize-y"
+                            />
+                          </div>
+                        ) : (
+                          <p className="text-xs text-gray-400">(텍스트 없음)</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+              )}
+              {imageTexts.length === 0 && (
+                <div className="text-center py-8 text-gray-300">
+                  <ImageIcon className="w-8 h-8 mx-auto mb-2" />
+                  <p className="text-sm">이미지 내 텍스트 없음</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 글로벌 옵션 (collapsed by default) */}
+          {globalData.global_options &&
+            globalData.global_options.length > 0 && (
+              <Section title="글로벌 옵션" icon={Tag} defaultOpen={false}>
+                <div className="space-y-3 text-sm">
+                  {globalData.global_options.map((opt, i) => (
+                    <div
+                      key={i}
+                      className="p-3 bg-gray-50 rounded-lg space-y-1"
+                    >
+                      <p className="font-medium text-gray-700">
+                        {opt.original_name}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        EN: {opt.name_en} → [{opt.values_en.join(', ')}]
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        JA: {opt.name_ja} → [{opt.values_ja.join(', ')}]
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )}
+
+          {/* 등록 결과 */}
+          {registerResult && (
+            <div
+              className={`p-4 rounded-lg flex items-start gap-2 text-sm ${
+                registerResult.success
+                  ? 'bg-green-50 border border-green-200 text-green-700'
+                  : 'bg-red-50 border border-red-200 text-red-700'
+              }`}
+            >
+              {registerResult.success ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
+              {registerResult.message}
+            </div>
+          )}
+        </div>
+
+        {/* Sticky bottom bar */}
+        <div className="border-t px-6 py-3 flex gap-3 shrink-0 bg-white rounded-b-xl">
+          <button
+            onClick={() => handleRegister(true)}
+            disabled={registerLoading}
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 border-2 border-orange-500 text-orange-600 hover:bg-orange-50 disabled:border-gray-300 disabled:text-gray-400 rounded-lg text-sm font-medium transition-colors"
+          >
+            {registerLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4" />
+            )}
+            임시저장
+          </button>
+          <button
+            onClick={() => handleRegister(false)}
+            disabled={registerLoading}
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white rounded-lg text-sm font-medium transition-colors"
+          >
+            {registerLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Send className="w-4 h-4" />
+            )}
+            판매 등록
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -181,6 +402,9 @@ export default function ProductDetailPage() {
 
   // 언어 탭
   const [activeLang, setActiveLang] = useState<'en' | 'ja'>('en')
+
+  // 번역 모달
+  const [modalOpen, setModalOpen] = useState<boolean>(false)
 
   // 국내 데이터 로드 (Playwright 기반이므로 120초 타임아웃)
   const loadDomesticData = useCallback(async () => {
@@ -223,6 +447,13 @@ export default function ProductDetailPage() {
   useEffect(() => {
     loadDomesticData()
   }, [loadDomesticData])
+
+  // 번역 완료 시 모달 자동 오픈
+  useEffect(() => {
+    if (globalData) {
+      setModalOpen(true)
+    }
+  }, [globalData])
 
   // 번역 미리보기
   const handleTranslate = async () => {
@@ -510,33 +741,53 @@ export default function ProductDetailPage() {
           )}
         </div>
 
-        {/* 우측: 번역 결과 */}
+        {/* 우측: 번역 컨트롤 */}
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
-              <Globe className="w-4 h-4" />
-              번역 결과
-            </h2>
-            <button
-              onClick={handleTranslate}
-              disabled={
-                translateLoading || !!domestic?.category_restricted
-              }
-              className="flex items-center gap-2 px-3 py-1.5 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white rounded-lg text-xs font-medium transition-colors"
-            >
-              {translateLoading ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  번역 중...
-                </>
-              ) : (
-                <>
-                  <Languages className="w-3.5 h-3.5" />
-                  번역 미리보기
-                </>
-              )}
-            </button>
-          </div>
+          <h2 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+            <Globe className="w-4 h-4" />
+            번역
+          </h2>
+
+          {/* 번역 미리보기 버튼 */}
+          <button
+            onClick={handleTranslate}
+            disabled={translateLoading || !!domestic?.category_restricted}
+            className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white rounded-lg text-sm font-medium transition-colors"
+          >
+            {translateLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                번역 중...
+              </>
+            ) : (
+              <>
+                <Languages className="w-4 h-4" />
+                번역 미리보기
+              </>
+            )}
+          </button>
+
+          {/* 진행 상태 메시지 */}
+          {translateMessage && !translateError && (
+            <div className={`p-3 rounded-lg border ${
+              translateMessage === '번역 완료!'
+                ? 'bg-green-50 border-green-200'
+                : 'bg-blue-50 border-blue-200'
+            }`}>
+              <p className={`text-xs flex items-start gap-1.5 ${
+                translateMessage === '번역 완료!'
+                  ? 'text-green-700'
+                  : 'text-blue-700'
+              }`}>
+                {translateMessage === '번역 완료!' ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                ) : (
+                  <Loader2 className="w-3.5 h-3.5 shrink-0 mt-0.5 animate-spin" />
+                )}
+                {translateMessage}
+              </p>
+            </div>
+          )}
 
           {/* 에러 */}
           {translateError && (
@@ -548,167 +799,15 @@ export default function ProductDetailPage() {
             </div>
           )}
 
-          {/* 성공 메시지 */}
-          {translateMessage && !translateError && (
-            <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
-              <p className="text-xs text-green-700 flex items-start gap-1.5">
-                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                {translateMessage}
-              </p>
-            </div>
-          )}
-
-          {/* 언어 탭 */}
-          <div className="flex rounded-lg border overflow-hidden">
-            <button
-              onClick={() => setActiveLang('en')}
-              className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
-                activeLang === 'en'
-                  ? 'bg-orange-500 text-white'
-                  : 'bg-white text-gray-600 hover:bg-gray-50'
-              }`}
-            >
-              English
-            </button>
-            <button
-              onClick={() => setActiveLang('ja')}
-              className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
-                activeLang === 'ja'
-                  ? 'bg-orange-500 text-white'
-                  : 'bg-white text-gray-600 hover:bg-gray-50'
-              }`}
-            >
-              日本語
-            </button>
-          </div>
-
-          {/* 번역 편집 패널 */}
-          <div className="border rounded-lg p-4 bg-white min-h-[300px]">
-            <LanguagePanel
-              lang={activeLang}
-              langData={globalData?.[activeLang] || null}
-              onChange={(updated) => updateLangData(activeLang, updated)}
-            />
-          </div>
-
-          {/* 이미지 내 텍스트 */}
-          {globalData && (() => {
-            const imageTexts = activeLang === 'en'
-              ? globalData.en?.image_texts
-              : globalData.ja?.image_texts
-            if (!imageTexts || imageTexts.length === 0) return null
-            return (
-              <Section title={`이미지 내 텍스트 (${imageTexts.length}개)`} icon={ImageIcon} defaultOpen={true}>
-                <div className="space-y-4">
-                  {imageTexts.map((item: ImageText, i: number) => (
-                    <div key={i} className="border rounded-lg p-3 bg-white">
-                      {/* 이미지 비교: 원본 ↔ 번역 */}
-                      <div className="flex gap-3 mb-2">
-                        <div className="flex-1">
-                          <p className="text-[10px] text-gray-400 mb-1">원본</p>
-                          <div className="rounded border overflow-hidden bg-gray-100 aspect-video">
-                            <img
-                              src={item.image_url}
-                              alt={`원본 ${item.order_index + 1}`}
-                              className="w-full h-full object-contain"
-                            />
-                          </div>
-                        </div>
-                        {item.translated_image_base64 && (
-                          <div className="flex-1">
-                            <p className="text-[10px] text-orange-500 mb-1">번역</p>
-                            <div className="rounded border border-orange-200 overflow-hidden bg-gray-100 aspect-video">
-                              <img
-                                src={`data:image/png;base64,${item.translated_image_base64}`}
-                                alt={`번역 ${item.order_index + 1}`}
-                                className="w-full h-full object-contain"
-                              />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                      {/* 텍스트 */}
-                      {item.original_text ? (
-                        <div className="space-y-1">
-                          <p className="text-xs text-gray-400 line-clamp-2">{item.original_text}</p>
-                          <textarea
-                            value={item.translated_text}
-                            onChange={(e) => {
-                              if (!globalData[activeLang]) return
-                              const updatedTexts = [...(globalData[activeLang]!.image_texts)]
-                              updatedTexts[i] = { ...updatedTexts[i], translated_text: e.target.value }
-                              updateLangData(activeLang, {
-                                ...globalData[activeLang]!,
-                                image_texts: updatedTexts,
-                              })
-                            }}
-                            rows={2}
-                            className="w-full px-2 py-1 border rounded text-xs focus:ring-1 focus:ring-orange-500 outline-none resize-y"
-                          />
-                        </div>
-                      ) : (
-                        <p className="text-xs text-gray-400">(텍스트 없음)</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </Section>
-            )
-          })()}
-
-          {/* 글로벌 옵션 */}
-          {globalData?.global_options &&
-            globalData.global_options.length > 0 && (
-              <Section title="글로벌 옵션" icon={Tag} defaultOpen={false}>
-                <div className="space-y-3 text-sm">
-                  {globalData.global_options.map((opt, i) => (
-                    <div
-                      key={i}
-                      className="p-3 bg-gray-50 rounded-lg space-y-1"
-                    >
-                      <p className="font-medium text-gray-700">
-                        {opt.original_name}
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        EN: {opt.name_en} → [{opt.values_en.join(', ')}]
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        JA: {opt.name_ja} → [{opt.values_ja.join(', ')}]
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </Section>
-            )}
-
-          {/* 액션 버튼 */}
+          {/* 번역 결과 보기 버튼 */}
           {globalData && (
-            <div className="flex gap-3">
-              <button
-                onClick={() => handleRegister(true)}
-                disabled={registerLoading}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 border-2 border-orange-500 text-orange-600 hover:bg-orange-50 disabled:border-gray-300 disabled:text-gray-400 rounded-lg text-sm font-medium transition-colors"
-              >
-                {registerLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Save className="w-4 h-4" />
-                )}
-                임시저장
-              </button>
-              <button
-                onClick={() => handleRegister(false)}
-                disabled={registerLoading}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-300 text-white rounded-lg text-sm font-medium transition-colors"
-              >
-                {registerLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Send className="w-4 h-4" />
-                )}
-                판매 등록
-              </button>
-            </div>
+            <button
+              onClick={() => setModalOpen(true)}
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 border-2 border-orange-500 text-orange-600 hover:bg-orange-50 rounded-lg text-sm font-medium transition-colors"
+            >
+              <Eye className="w-4 h-4" />
+              번역 결과 보기
+            </button>
           )}
 
           {/* 등록 결과 */}
@@ -730,6 +829,22 @@ export default function ProductDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Translation Modal */}
+      {globalData && (
+        <TranslationModal
+          isOpen={modalOpen}
+          onClose={() => setModalOpen(false)}
+          productTitle={domestic?.title || '작품 상세'}
+          globalData={globalData}
+          activeLang={activeLang}
+          setActiveLang={setActiveLang}
+          updateLangData={updateLangData}
+          handleRegister={handleRegister}
+          registerLoading={registerLoading}
+          registerResult={registerResult}
+        />
+      )}
     </div>
   )
 }
