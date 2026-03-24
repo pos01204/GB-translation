@@ -649,18 +649,22 @@ class GBProductTranslator:
         return result
 
     async def _translate_single_text(self, text: str, language: str) -> str:
-        """단일 텍스트(옵션명 등) 간단 번역"""
+        """단일 텍스트(옵션명/값 등) 간단 번역 — 1단어~짧은 텍스트용"""
         if not text or not text.strip():
             return text
 
-        prompt_template = (
-            GB_TITLE_PROMPT_EN if language == "en"
-            else GB_TITLE_PROMPT_JA
+        lang_name = "English" if language == "en" else "Japanese"
+        prompt = (
+            f"Translate the following Korean text to {lang_name}. "
+            f"Return ONLY the translated text, nothing else. "
+            f"If it's already in {lang_name}, return it as-is.\n\n"
+            f"{text}"
         )
-        prompt = prompt_template.format(text=text)
-        result = await self._call_llm(prompt)
+        result = await self._call_llm(prompt, max_tokens=200)
         if result:
-            return result.strip().strip('"').strip("'")
+            # 줄바꿈/따옴표 제거, 첫 줄만
+            cleaned = result.strip().strip('"').strip("'").split('\n')[0].strip()
+            return cleaned if cleaned else text
         return text
 
     async def _translate_option_values(

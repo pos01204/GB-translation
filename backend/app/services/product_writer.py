@@ -121,13 +121,25 @@ class ProductWriter:
                         return { success: false, error: '_detailUI not found' };
                     }
 
-                    // 모든 데이터 일괄 주입
-                    ui.productName = data.title || '';
-                    ui.images = data.images || [];
-                    ui.keywords = data.keywords || [];
-                    ui.premiumDescription = data.blocks || [];
+                    // Vue.set()으로 반응형 주입 (Vue 2 reactive system 대응)
+                    const Vue = app.__vue__.$options._base
+                        || app.__vue__.constructor
+                        || window.Vue;
 
-                    // textarea에도 값 반영 (Vue reactivity)
+                    if (Vue && Vue.set) {
+                        Vue.set(ui, 'productName', data.title || '');
+                        Vue.set(ui, 'images', data.images || []);
+                        Vue.set(ui, 'keywords', data.keywords || []);
+                        Vue.set(ui, 'premiumDescription', data.blocks || []);
+                    } else {
+                        // Vue.set 없으면 직접 대입 + $forceUpdate
+                        ui.productName = data.title || '';
+                        ui.images = data.images || [];
+                        ui.keywords = data.keywords || [];
+                        ui.premiumDescription = data.blocks || [];
+                    }
+
+                    // textarea에도 값 반영
                     const textarea = document.querySelector('textarea[name="globalProductName"]');
                     if (textarea) {
                         textarea.value = data.title || '';
