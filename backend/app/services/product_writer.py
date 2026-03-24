@@ -217,17 +217,20 @@ class ProductWriter:
             return False
 
     async def fill_keywords(self, keywords: list[str]) -> bool:
-        """작품 키워드 입력 — 키워드 섹션 클릭 후 입력"""
+        """작품 키워드 입력 — 키워드 섹션 클릭 → 모달/패널에서 입력 → 닫기"""
         try:
-            # 키워드 섹션의 '>' 화살표 또는 영역 클릭
+            # 키워드 섹션 클릭 (모달/패널 열기)
             kw_section = self.page.locator(
-                'text=작품 키워드'
+                '.GlobalProductForm__contentItem:has-text("작품 키워드")'
             ).first
+            if await kw_section.count() == 0:
+                kw_section = self.page.locator('text=작품 키워드').first
+
             if await kw_section.count() > 0:
                 await kw_section.click()
-                await asyncio.sleep(1)
+                await asyncio.sleep(1.5)
 
-            # 키워드 입력 필드 찾기
+            # 키워드 입력 필드 찾기 (모달/패널 내부)
             keyword_input = self.page.locator(
                 'input[placeholder*="키워드"], '
                 'input[name*="keyword"], '
@@ -247,9 +250,29 @@ class ProductWriter:
                 await asyncio.sleep(0.3)
 
             logger.info(f"키워드 {len(keywords)}개 입력 완료")
+
+            # 모달/패널 닫기 — 저장 버튼 또는 ESC
+            save_btn = self.page.locator(
+                '.v-dialog--active button:has-text("저장"), '
+                '.v-dialog--active button:has-text("확인"), '
+                '.v-dialog--active button:has-text("적용")'
+            ).first
+            if await save_btn.count() > 0:
+                await save_btn.click()
+                await asyncio.sleep(1)
+            else:
+                await self.page.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
+
             return True
         except Exception as e:
             logger.error(f"키워드 입력 실패: {e}")
+            # 모달이 열려있을 수 있으므로 ESC
+            try:
+                await self.page.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
             return False
 
     async def fill_global_options(
@@ -257,9 +280,17 @@ class ProductWriter:
     ) -> bool:
         """글로벌 옵션 입력 — "옵션 편집" 버튼 클릭 → 모달에서 입력"""
         try:
+            # 다른 모달/패널이 열려있을 수 있으므로 먼저 닫기
+            await self.page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
             edit_btn = self.page.locator('button:has-text("옵션 편집")').first
-            if await edit_btn.count() == 0:
-                logger.warning("옵션 편집 버튼을 찾을 수 없습니다")
+            try:
+                btn_count = await asyncio.wait_for(edit_btn.count(), timeout=5)
+            except asyncio.TimeoutError:
+                btn_count = 0
+            if btn_count == 0:
+                logger.warning("옵션 편집 버튼을 찾을 수 없습니다 (건너뜀)")
                 return False
 
             await edit_btn.click()
@@ -312,14 +343,26 @@ class ProductWriter:
         """임시저장 — "일본어 임시저장" / "영어 임시저장" 버튼"""
         lang_text = "영어" if language == "en" else "일본어"
         try:
+            # 열려있는 모달/패널 닫기
+            await self.page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
             draft_btn = self.page.locator(
                 f'button:has-text("{lang_text} 임시저장")'
             ).first
-            if await draft_btn.count() == 0:
+            try:
+                btn_count = await asyncio.wait_for(draft_btn.count(), timeout=5)
+            except asyncio.TimeoutError:
+                btn_count = 0
+            if btn_count == 0:
                 # 폴백: 일반 임시저장
                 draft_btn = self.page.locator('button:has-text("임시저장")').first
+                try:
+                    btn_count = await asyncio.wait_for(draft_btn.count(), timeout=3)
+                except asyncio.TimeoutError:
+                    btn_count = 0
 
-            if await draft_btn.count() == 0:
+            if btn_count == 0:
                 logger.warning("임시저장 버튼을 찾을 수 없습니다")
                 return False
 
@@ -335,13 +378,25 @@ class ProductWriter:
         """판매 등록 — "일본어 작품 판매하기" / "영어 작품 판매하기" 버튼"""
         lang_text = "영어" if language == "en" else "일본어"
         try:
+            # 열려있는 모달/패널 닫기
+            await self.page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
             publish_btn = self.page.locator(
                 f'button:has-text("{lang_text} 작품 판매하기")'
             ).first
-            if await publish_btn.count() == 0:
+            try:
+                btn_count = await asyncio.wait_for(publish_btn.count(), timeout=5)
+            except asyncio.TimeoutError:
+                btn_count = 0
+            if btn_count == 0:
                 publish_btn = self.page.locator('button:has-text("작품 판매하기")').first
+                try:
+                    btn_count = await asyncio.wait_for(publish_btn.count(), timeout=3)
+                except asyncio.TimeoutError:
+                    btn_count = 0
 
-            if await publish_btn.count() == 0:
+            if btn_count == 0:
                 logger.warning("판매 등록 버튼을 찾을 수 없습니다")
                 return False
 
