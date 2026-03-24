@@ -582,43 +582,42 @@ class ArtistWebSession:
         return None
 
     async def _load_remaining_pages(self, status: str) -> list[ProductSummary]:
-        """스크롤 또는 페이지 버튼으로 나머지 페이지 로드"""
+        """스크롤로 나머지 페이지 로드 — expect_response로 API 응답 대기"""
         all_remaining = []
-        max_scrolls = 30
+        empty_count = 0  # 연속 빈 응답 카운터
 
-        for i in range(max_scrolls):
-            captured = []
-
-            async def on_resp(response):
-                try:
-                    if response.status == 200 and "paging" in response.url and "idus" in response.url:
-                        ct = response.headers.get("content-type", "")
-                        if "json" in ct:
-                            body = await response.json()
-                            captured.append(body)
-                except Exception:
-                    pass
-
-            self.page.on("response", on_resp)
+        for i in range(30):
             try:
-                # 스크롤 다운으로 다음 페이지 트리거
-                await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(2)
-            finally:
-                self.page.remove_listener("response", on_resp)
+                # 스크롤 후 paging API 응답을 명시적으로 대기 (최대 5초)
+                async with self.page.expect_response(
+                    lambda r: "paging" in r.url and r.status == 200,
+                    timeout=5000
+                ) as response_info:
+                    await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
 
-            if not captured:
-                break  # 더 이상 API 호출 없음
-
-            for body in captured:
+                response = await response_info.value
+                body = await response.json()
                 items = self._find_product_array(body)
+
                 if items:
                     products = self._parse_api_items(items, status)
                     all_remaining.extend(products)
+                    empty_count = 0
                     logger.info(f"[추가 페이지] {len(products)}개 추출 (누적: {len(all_remaining)})")
 
                     if not self._check_has_next_page(body, i + 1, len(items)):
-                        return all_remaining
+                        break
+                else:
+                    empty_count += 1
+
+            except Exception:
+                empty_count += 1
+
+            if empty_count >= 2:
+                logger.info(f"[추가 페이지] 2회 연속 빈 응답 → 페이지네이션 종료 (누적: {len(all_remaining)})")
+                break
+
+            await asyncio.sleep(1)
 
         return all_remaining
 
