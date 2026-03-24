@@ -982,3 +982,71 @@ async def debug_test_option_reader():
     except Exception as e:
         result["error"] = str(e)
         return {"success": False, "data": result}
+
+
+@router.get("/api/debug/intercept-save", summary="임시저장 API 인터셉트")
+async def debug_intercept_save():
+    """글로벌 페이지에서 임시저장 클릭 시 호출되는 API를 캡처합니다."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    page = _artist_session.page
+    captured_requests = []
+
+    try:
+        # 글로벌 페이지 확인
+        if "/global" not in page.url:
+            return {"error": f"글로벌 페이지가 아닙니다: {page.url}"}
+
+        # 모든 POST/PUT/PATCH 요청 캡처
+        async def on_request(request):
+            if request.method in ("POST", "PUT", "PATCH") and "idus" in request.url:
+                try:
+                    body = request.post_data
+                    captured_requests.append({
+                        "url": request.url,
+                        "method": request.method,
+                        "headers": dict(request.headers),
+                        "body_preview": body[:2000] if body else None,
+                        "body_length": len(body) if body else 0,
+                    })
+                except Exception:
+                    captured_requests.append({
+                        "url": request.url,
+                        "method": request.method,
+                    })
+
+        page.on("request", on_request)
+
+        try:
+            # 작품명을 임시로 입력 (필수 필드)
+            textarea = page.locator('textarea[name="globalProductName"]').first
+            if await textarea.count() > 0:
+                current = await textarea.input_value()
+                if not current:
+                    await textarea.fill("테스트 작품명")
+                    await asyncio.sleep(0.5)
+
+            # "임시저장" 버튼 클릭
+            save_btn = page.locator('button:has-text("임시저장")').first
+            if await save_btn.count() > 0:
+                await save_btn.click()
+                await asyncio.sleep(3)  # API 호출 대기
+            else:
+                return {"error": "임시저장 버튼 없음"}
+
+        finally:
+            page.remove_listener("request", on_request)
+
+        return {
+            "success": True,
+            "captured_count": len(captured_requests),
+            "requests": captured_requests,
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
