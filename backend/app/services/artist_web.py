@@ -98,9 +98,16 @@ class ArtistWebSession:
                 f"{settings.artist_web_base_url}/login",
                 timeout=settings.page_load_timeout,
             )
-            # networkidle 대신 domcontentloaded 사용 (더 빠름)
             await self.page.wait_for_load_state("domcontentloaded")
             logger.info(f"로그인 페이지 로드 완료: {self.page.url}")
+
+            # 이미 로그인된 경우 (메인으로 리다이렉트됨)
+            if "/login" not in self.page.url:
+                logger.info("이미 로그인된 상태 — 세션 유지")
+                self._authenticated = True
+                self._saved_email = email
+                self._saved_password = password
+                return True
 
             # 이메일 입력
             email_input = self.page.locator('input[type="email"], input[name="email"]')
