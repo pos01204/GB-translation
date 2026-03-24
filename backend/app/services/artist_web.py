@@ -158,90 +158,69 @@ class ArtistWebSession:
         if not await self.is_authenticated():
             raise Exception("로그인이 필요합니다")
 
-        # ── 전략 1: 브라우저 내 fetch()로 API 직접 호출 ──
-        api_path_map = {
-            "selling": "/api/v1/product/public/sale/paging",
-            "paused": "/api/v1/product/public/pause/paging",
-            "draft": "/api/v1/product/public/draft/paging",
+        # ── 전략 1: 페이지 이동 후 SPA API 응답 캡처 ──
+        url_map = {
+            "selling": "/product/list",
+            "paused": "/product/list/pause",
+            "draft": "/product/list/draft",
         }
-        api_path = api_path_map.get(status, api_path_map["selling"])
-        api_base = "https://artist-aggregator.idus.com"
+        target_url = f"{settings.artist_web_base_url}{url_map.get(status, '/product/list')}"
 
         try:
             all_products = []
-            page_num = 0
-            max_pages = 50  # 안전장치
+            captured_responses = []
 
-            while page_num < max_pages:
-                api_url = (
-                    f"{api_base}{api_path}"
-                    f"?page={page_num}&sort=&query=&management_category_id=0"
-                )
-                logger.info(f"[API 직접호출] page={page_num}, URL: {api_url}")
+            async def on_api_response(response):
+                """SPA가 호출하는 paging API 응답을 캡처"""
+                try:
+                    url = response.url
+                    if response.status == 200 and "paging" in url and "idus" in url:
+                        ct = response.headers.get("content-type", "")
+                        if "json" in ct:
+                            body = await response.json()
+                            captured_responses.append({"url": url, "body": body})
+                            logger.info(f"[API 캡처] 응답 수신: {url}")
+                except Exception:
+                    pass
 
-                # 브라우저 컨텍스트 내에서 fetch 실행 (쿠키 자동 포함)
-                api_response = await self.page.evaluate("""
-                    async (url) => {
-                        try {
-                            const resp = await fetch(url, {
-                                method: 'GET',
-                                credentials: 'include',
-                                headers: {
-                                    'Accept': 'application/json',
-                                },
-                            });
-                            if (!resp.ok) {
-                                return { error: `HTTP ${resp.status}`, status: resp.status };
-                            }
-                            const data = await resp.json();
-                            return { ok: true, data: data };
-                        } catch (e) {
-                            return { error: e.message };
-                        }
-                    }
-                """, api_url)
+            self.page.on("response", on_api_response)
 
-                if not api_response or api_response.get("error"):
-                    error_msg = api_response.get("error", "unknown") if api_response else "null response"
-                    logger.warning(f"[API 직접호출] 실패: {error_msg}")
-                    break
+            try:
+                # 페이지 이동 → SPA가 자동으로 API 호출
+                logger.info(f"[API 캡처] 페이지 이동: {target_url}")
+                await self.page.goto(target_url, timeout=settings.page_load_timeout)
+                await self.page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(5)  # SPA 렌더링 + API 호출 대기
+            finally:
+                self.page.remove_listener("response", on_api_response)
 
-                body = api_response.get("data")
-                if not body:
-                    logger.warning("[API 직접호출] 응답 데이터 없음")
-                    break
-
-                # 응답에서 작품 배열 추출
+            # 캡처된 응답 처리
+            for resp_data in captured_responses:
+                body = resp_data["body"]
                 items = self._find_product_array(body)
                 if not items:
-                    logger.info(f"[API 직접호출] page={page_num}에서 작품 배열 없음, 종료")
-                    break
+                    continue
 
-                # 작품 데이터 파싱
                 page_products = self._parse_api_items(items, status)
-                if not page_products:
-                    logger.info(f"[API 직접호출] page={page_num}에서 파싱 결과 0건, 종료")
-                    break
+                if page_products:
+                    all_products.extend(page_products)
+                    logger.info(f"[API 캡처] {len(page_products)}개 작품 추출 (URL: {resp_data['url']})")
 
-                all_products.extend(page_products)
-                logger.info(f"[API 직접호출] page={page_num}: {len(page_products)}개 추출 (누적: {len(all_products)})")
-
-                # 다음 페이지 존재 여부 확인
-                # totalPages / last / totalElements 등 다양한 구조 대응
-                has_next = self._check_has_next_page(body, page_num, len(items))
-                if not has_next:
-                    break
-
-                page_num += 1
+                    # 페이지네이션 확인
+                    has_next = self._check_has_next_page(body, 0, len(items))
+                    if has_next:
+                        # 스크롤로 다음 페이지 트리거
+                        more_products = await self._load_remaining_pages(status)
+                        all_products.extend(more_products)
 
             if all_products:
-                logger.info(f"[API 직접호출 성공] 총 {len(all_products)}개 작품 ({status})")
+                logger.info(f"[API 캡처 성공] 총 {len(all_products)}개 작품 ({status})")
                 return all_products
             else:
-                logger.info("[API 직접호출] 작품 0건, DOM 스크래핑으로 전환")
+                logger.info(f"[API 캡처] 작품 0건 (캡처된 응답: {len(captured_responses)}건), DOM 스크래핑으로 전환")
 
         except Exception as e:
-            logger.warning(f"API 직접호출 실패: {e}")
+            logger.warning(f"API 캡처 실패: {e}")
 
         # ── 전략 2: DOM 스크래핑 (링크 그룹핑 방식) - 폴백 ──
         logger.info("DOM 스크래핑으로 전환...")
@@ -597,6 +576,47 @@ class ArtistWebSession:
                     if found and len(found) >= 2:
                         return found
         return None
+
+    async def _load_remaining_pages(self, status: str) -> list[ProductSummary]:
+        """스크롤 또는 페이지 버튼으로 나머지 페이지 로드"""
+        all_remaining = []
+        max_scrolls = 30
+
+        for i in range(max_scrolls):
+            captured = []
+
+            async def on_resp(response):
+                try:
+                    if response.status == 200 and "paging" in response.url and "idus" in response.url:
+                        ct = response.headers.get("content-type", "")
+                        if "json" in ct:
+                            body = await response.json()
+                            captured.append(body)
+                except Exception:
+                    pass
+
+            self.page.on("response", on_resp)
+            try:
+                # 스크롤 다운으로 다음 페이지 트리거
+                await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(2)
+            finally:
+                self.page.remove_listener("response", on_resp)
+
+            if not captured:
+                break  # 더 이상 API 호출 없음
+
+            for body in captured:
+                items = self._find_product_array(body)
+                if items:
+                    products = self._parse_api_items(items, status)
+                    all_remaining.extend(products)
+                    logger.info(f"[추가 페이지] {len(products)}개 추출 (누적: {len(all_remaining)})")
+
+                    if not self._check_has_next_page(body, i + 1, len(items)):
+                        return all_remaining
+
+        return all_remaining
 
     async def _scroll_to_load_all(self):
         """무한스크롤 페이지에서 모든 작품을 로드"""

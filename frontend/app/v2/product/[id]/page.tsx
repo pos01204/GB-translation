@@ -485,21 +485,16 @@ export default function ProductDetailPage() {
                       {opt.name}
                     </p>
                     <div className="flex flex-wrap gap-1 mt-1">
-                      {opt.values.map((v, j) => {
-                        const vAny = v as unknown as Record<string, unknown>
-                        const displayValue = typeof v === 'object' && v !== null ? (String(vAny.value || '') || JSON.stringify(v)) : String(v)
-                        const additionalPrice = typeof v === 'object' && v !== null ? Number(vAny.additional_price || 0) : 0
-                        return (
+                      {opt.values.map((v, j) => (
                         <span
                           key={j}
                           className="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600"
                         >
-                          {String(displayValue)}
-                          {typeof additionalPrice === 'number' && additionalPrice > 0 &&
-                            ` (+${additionalPrice.toLocaleString()}원)`}
+                          {v.value || '(값 없음)'}
+                          {v.additional_price > 0 &&
+                            ` (+${v.additional_price.toLocaleString()}원)`}
                         </span>
-                        )
-                      })}
+                      ))}
                     </div>
                   </div>
                 ))}
