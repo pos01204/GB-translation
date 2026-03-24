@@ -137,6 +137,7 @@ async def register_single(request: RegisterSingleRequest):
         writer = ProductWriter(page=_artist_session.page)
         result = await writer.register_global_product(
             global_data=global_data,
+            product_id=request.product_id,
             save_as_draft=request.save_as_draft,
         )
 
