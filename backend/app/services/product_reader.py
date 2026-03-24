@@ -302,46 +302,47 @@ class ProductReader:
         return product
 
     async def _read_options_from_modal(self) -> list[DomesticOption]:
-        """DOM에서 옵션 항목을 클릭하여 모달의 옵션명/값/추가금액을 읽기"""
+        """DOM에서 옵션 버튼을 클릭하여 모달의 옵션명/값/추가금액을 읽기"""
         options = []
         try:
-            # 옵션 섹션의 항목들 찾기 (= 아이콘 + 옵션명 텍스트)
-            option_items = await self.page.evaluate("""
+            # 옵션 섹션의 버튼들 직접 탐색 (ProductFormOptionSection__optionItem 내 버튼)
+            option_buttons = await self.page.evaluate("""
                 () => {
-                    // 옵션 섹션 내 클릭 가능한 항목 찾기
-                    const items = [];
-                    // "옵션" 텍스트가 포함된 섹션 찾기
-                    const allEls = document.querySelectorAll('div, section, [class*="option"]');
-                    for (const el of allEls) {
-                        const header = el.querySelector('h2, h3, h4, [class*="title"], [class*="header"]');
-                        if (!header || !header.textContent.includes('옵션')) continue;
-                        // 이 섹션 내의 항목들
-                        const clickables = el.querySelectorAll('[draggable], [class*="item"], [class*="drag"]');
-                        for (const item of clickables) {
-                            const text = item.textContent.trim();
-                            if (text && text.length < 30 && text !== '옵션' && !text.includes('추가')) {
-                                items.push(text.replace(/^[=≡☰]/g, '').trim());
+                    const buttons = [];
+                    // 확정된 클래스: ProductFormOptionSection__optionItem 내의 버튼
+                    const items = document.querySelectorAll('[class*="optionItem"] button, [class*="OptionItem"] button');
+                    for (const btn of items) {
+                        const text = btn.textContent?.trim();
+                        if (text && text.length < 30) buttons.push(text);
+                    }
+                    // 폴백: 옵션 섹션 내 모든 BaseButton
+                    if (buttons.length === 0) {
+                        const allBtns = document.querySelectorAll('.BaseButton');
+                        for (const btn of allBtns) {
+                            const parent = btn.closest('[class*="option"], [class*="Option"]');
+                            if (parent) {
+                                const text = btn.textContent?.trim();
+                                if (text && text.length < 30) buttons.push(text);
                             }
                         }
-                        break;
                     }
-                    return items;
+                    return buttons;
                 }
             """)
 
-            logger.info(f"[DOM 모달] 옵션 항목 발견: {option_items}")
+            logger.info(f"[DOM 모달] 옵션 버튼 발견: {option_buttons}")
 
-            for option_name in option_items:
-                if not option_name:
+            for btn_text in option_buttons:
+                if not btn_text:
                     continue
 
                 try:
-                    # 옵션 항목 클릭하여 모달 열기 — 버튼 우선 탐색
+                    # 버튼 직접 클릭 (정확한 텍스트 매칭)
                     option_el = self.page.locator(
-                        f'button:has-text("{option_name}")'
+                        f'[class*="optionItem"] button:has-text("{btn_text}")'
                     ).first
                     if await option_el.count() == 0:
-                        option_el = self.page.locator(f'text="{option_name}"').first
+                        option_el = self.page.locator(f'button:has-text("{btn_text}")').first
                     if await option_el.count() > 0:
                         await option_el.click()
                         await asyncio.sleep(1.5)  # 모달 렌더링 대기
