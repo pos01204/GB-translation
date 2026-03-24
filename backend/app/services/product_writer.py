@@ -244,7 +244,7 @@ class ProductWriter:
                     continue
                 await keyword_input.fill(kw)
                 await keyword_input.press('Enter')
-                await asyncio.sleep(300)
+                await asyncio.sleep(0.3)
 
             logger.info(f"키워드 {len(keywords)}개 입력 완료")
             return True
@@ -289,7 +289,7 @@ class ProductWriter:
                     if await value_input.count() > 0:
                         await value_input.fill(val)
                         await value_input.press('Enter')
-                        await asyncio.sleep(300)
+                        await asyncio.sleep(0.3)
 
             # 저장/닫기
             save_btn = modal.locator('button:has-text("저장"), button:has-text("적용")').first
