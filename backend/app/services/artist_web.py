@@ -5,6 +5,7 @@ Playwright 기반의 인증 및 네비게이션
 import asyncio
 import re
 import logging
+import time
 from typing import Optional
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from ..config import settings
@@ -36,6 +37,7 @@ class ArtistWebSession:
         self._authenticated = False
         self._initialized = False
         self._last_api_raw_sample: dict | None = None
+        self._product_list_cache: dict = {}  # {status: (timestamp, products)}
 
     async def initialize(self):
         """Playwright 브라우저 초기화"""
@@ -157,6 +159,16 @@ class ArtistWebSession:
         if not await self.is_authenticated():
             raise Exception("로그인이 필요합니다")
 
+        # ── 캐시 확인 ──
+        CACHE_TTL = 300  # 5분
+
+        cache_key = status
+        if cache_key in self._product_list_cache:
+            cached_time, cached_products = self._product_list_cache[cache_key]
+            if time.time() - cached_time < CACHE_TTL:
+                logger.info(f"[캐시 히트] {len(cached_products)}개 작품 ({status})")
+                return cached_products
+
         # ── 전략 1: 페이지 이동 후 SPA API 응답 캡처 ──
         url_map = {
             "selling": "/product/list",
@@ -214,6 +226,7 @@ class ArtistWebSession:
 
             if all_products:
                 logger.info(f"[API 캡처 성공] 총 {len(all_products)}개 작품 ({status})")
+                self._product_list_cache[cache_key] = (time.time(), all_products)
                 return all_products
             else:
                 logger.info(f"[API 캡처] 작품 0건 (캡처된 응답: {len(captured_responses)}건), DOM 스크래핑으로 전환")
@@ -393,6 +406,7 @@ class ArtistWebSession:
             ))
 
         logger.info(f"[DOM 스크래핑] {len(result)}개 작품 추출 ({status})")
+        self._product_list_cache[cache_key] = (time.time(), result)
         return result
 
     def _parse_api_items(

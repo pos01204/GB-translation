@@ -217,10 +217,27 @@ function TranslationModal({
                     <label className="block text-xs font-medium text-gray-500 mb-1">
                       미리보기
                     </label>
-                    <div
-                      className="p-4 border rounded-lg bg-white prose prose-sm max-w-none prose-h3:text-base prose-h3:font-bold prose-h3:text-gray-900 prose-h3:mt-4 prose-h3:mb-2 prose-p:text-sm prose-p:text-gray-700 prose-p:my-1 prose-hr:my-3 prose-img:rounded-lg prose-img:my-3"
-                      dangerouslySetInnerHTML={{ __html: langData.description_html }}
-                    />
+                    <div className="p-4 border rounded-lg bg-white">
+                      {/* description_blocks 렌더링 */}
+                      {langData.description_blocks && langData.description_blocks.length > 0 ? (
+                        <div className="space-y-2 text-sm">
+                          {langData.description_blocks.map((block: { type: string; value: string | string[] }, i: number) => {
+                            if (block.type === 'SUBJECT') return <h3 key={i} className="font-bold text-base text-gray-900 mt-4">{block.value}</h3>
+                            if (block.type === 'TEXT') return <p key={i} className="text-gray-700 leading-relaxed">{String(block.value)}</p>
+                            if (block.type === 'IMAGE') return (
+                              <div key={i} className="my-2">
+                                <img src={Array.isArray(block.value) ? block.value[0] : block.value} alt="" className="w-full rounded-lg" />
+                              </div>
+                            )
+                            if (block.type === 'LINE') return <hr key={i} className="my-3 border-gray-200" />
+                            if (block.type === 'BLANK') return <div key={i} className="h-3" />
+                            return null
+                          })}
+                        </div>
+                      ) : langData.description_html ? (
+                        <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: langData.description_html }} />
+                      ) : null}
+                    </div>
                   </div>
                 </>
               )}

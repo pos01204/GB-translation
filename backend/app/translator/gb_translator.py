@@ -127,12 +127,14 @@ class GBProductTranslator:
         if do_en:
             en_desc, en_blocks = await self._build_gb_description(
                 domestic, ocr_texts, "en", korean_image_urls,
+                ocr_results=ocr_results,
             )
             logger.info(f"EN 설명 재구성 완료 ({len(en_blocks)} 블록)")
 
         if do_ja:
             ja_desc, ja_blocks = await self._build_gb_description(
                 domestic, ocr_texts, "ja", korean_image_urls,
+                ocr_results=ocr_results,
             )
             logger.info(f"JA 설명 재구성 완료 ({len(ja_blocks)} 블록)")
 
@@ -280,6 +282,7 @@ class GBProductTranslator:
         ocr_texts: list[str],
         language: str,
         korean_image_urls: set[str] | None = None,
+        ocr_results: list[dict] | None = None,
     ) -> tuple[str, list[dict]]:
         """KR 데이터를 기반으로 GB 설명 생성 → (HTML, premiumDescription 블록 배열)
 
@@ -332,9 +335,10 @@ class GBProductTranslator:
         # HTML → 텍스트 블록 배열
         text_blocks = self._html_to_blocks(html)
 
-        # 가용 이미지 큐 구성 (한글 없는 이미지만)
+        # 가용 이미지 큐 구성 (한글 없는 이미지만, OCR 결과로 한글 필터링 강화)
         available_images = self._collect_available_images(
             domestic, korean_image_urls,
+            ocr_results=ocr_results,
         )
 
         # 텍스트 블록 사이에 이미지 삽입
@@ -356,30 +360,65 @@ class GBProductTranslator:
     def _collect_available_images(
         domestic: DomesticProduct,
         korean_image_urls: set[str],
+        ocr_results: list[dict] | None = None,
     ) -> list[str]:
         """product_images + detail_images에서 한글 없는 이미지 URL만 수집
 
         한글 감지 기준:
         1. OCR에서 한글 문자가 검출된 이미지 (korean_image_urls)
-        2. product_images는 보통 제품 실물 사진이므로 포함
-           단, OCR에서 한글이 검출된 URL은 제외
+        2. ocr_results의 텍스트를 regex로 재검사하여 한글 포함 이미지 추가 필터링
+        3. product_images도 OCR 결과가 있으면 동일하게 검사
         """
+        import re as _re
+
+        # OCR 결과에서 URL → 텍스트 매핑 구성
+        ocr_text_by_url: dict[str, str] = {}
+        if ocr_results:
+            for r in ocr_results:
+                ocr_text_by_url[r["image_url"]] = r.get("original_text", "")
+
+        # 한글 문자 regex 패턴 (혼합 텍스트도 감지)
+        korean_pattern = _re.compile(r'[\uac00-\ud7a3]')
+
+        # korean_image_urls 확장: OCR 텍스트에서 한글이 포함된 URL 추가
+        filtered_urls = set(korean_image_urls)
+        for url, text in ocr_text_by_url.items():
+            if korean_pattern.search(text):
+                if url not in filtered_urls:
+                    logger.info(f"[한글 필터] OCR 한글 감지로 제외: {url[:80]}...")
+                    filtered_urls.add(url)
+
         urls = []
         seen = set()
 
         # product_images (OCR에서 한글 검출된 것은 제외)
         for img in domestic.product_images:
             url = img.url
-            if url and url not in seen and url not in korean_image_urls:
-                urls.append(url)
+            if not url or url in seen:
+                continue
+            if url in filtered_urls:
+                logger.info(f"[한글 필터] product_image 제외: {url[:80]}...")
                 seen.add(url)
+                continue
+            urls.append(url)
+            seen.add(url)
 
         # detail_images 중 한글 없는 것
         for img in domestic.detail_images:
             url = img.url
-            if url and url not in seen and url not in korean_image_urls:
-                urls.append(url)
+            if not url or url in seen:
+                continue
+            if url in filtered_urls:
+                logger.info(f"[한글 필터] detail_image 제외: {url[:80]}...")
                 seen.add(url)
+                continue
+            urls.append(url)
+            seen.add(url)
+
+        logger.info(
+            f"[이미지 수집] 전체 {len(domestic.product_images) + len(domestic.detail_images)}개 → "
+            f"한글 필터 후 {len(urls)}개 사용 (제외 {len(filtered_urls)}개)"
+        )
 
         return urls
 

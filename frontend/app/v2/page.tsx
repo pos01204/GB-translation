@@ -274,12 +274,36 @@ export default function V2DashboardPage() {
       .finally(() => setCheckingSession(false))
   }, [])
 
-  const loadProducts = useCallback(async () => {
+  const loadProducts = useCallback(async (forceRefresh = false) => {
     setLoading(true)
     try {
+      // 캐시 확인 (5분 이내, 강제 새로고침이 아닌 경우)
+      if (!forceRefresh && typeof window !== 'undefined') {
+        const cached = sessionStorage.getItem(`products_${statusFilter}`)
+        if (cached) {
+          try {
+            const { data, timestamp } = JSON.parse(cached)
+            if (Date.now() - timestamp < 5 * 60 * 1000) {
+              setProducts(data.products || [])
+              setLoading(false)
+              return
+            }
+          } catch {}
+        }
+      }
+
       const result = await getProductList(statusFilter)
       setProducts(result.products || [])
       setDebugInfo(result.debug_info ?? null)
+
+      // 캐시 저장
+      if (typeof window !== 'undefined') {
+        try {
+          sessionStorage.setItem(`products_${statusFilter}`,
+            JSON.stringify({ data: result, timestamp: Date.now() })
+          )
+        } catch {}
+      }
     } catch (err) {
       console.error('작품 목록 로드 실패:', err)
     } finally {
@@ -358,7 +382,7 @@ export default function V2DashboardPage() {
           </p>
         </div>
         <button
-          onClick={loadProducts}
+          onClick={() => loadProducts(true)}
           disabled={loading}
           className="flex items-center gap-2 px-3 py-2 text-sm border rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
         >
