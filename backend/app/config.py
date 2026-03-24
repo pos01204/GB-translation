@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     # Gemini API
     gemini_api_key: Optional[str] = None
 
+    # Claude API
+    claude_api_key: Optional[str] = None  # env: CLAUDE_API_KEY
+    translation_engine: str = "claude"     # "claude" or "gemini"
+
     # 서버 설정
     port: int = 8000
     debug: bool = False
@@ -26,7 +30,7 @@ class Settings(BaseSettings):
     artist_web_input_delay: int = 100          # 입력 간 대기 (ms)
 
     # 번역 설정
-    translation_rate_limit_delay: float = 6.5  # Gemini API 요청 간격 (초)
+    translation_rate_limit_delay: float = 1.0  # API 요청 간격 (초)
     translation_max_retries: int = 3
     title_max_length_global: int = 80          # 글로벌 작품명 최대 길이
 

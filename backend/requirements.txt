@@ -8,6 +8,7 @@ playwright-stealth==1.0.6
 
 # Google Gemini API (새로운 라이브러리)
 google-genai>=1.0.0
+anthropic>=0.45.0
 
 # HTTP 클라이언트
 httpx==0.26.0

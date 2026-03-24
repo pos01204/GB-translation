@@ -79,15 +79,32 @@ async def initialize_v1_services():
         logger.error(f"Playwright 초기화 실패: {e}")
         scraper = None
 
-    # GB 번역기 초기화 (v1 translator 래핑)
-    if translator and translator._initialized:
-        from .translator.gb_translator import GBProductTranslator
-        gb_translator = GBProductTranslator(base_translator=translator)
-        logger.info("GB 번역기 초기화 완료")
+    # Claude 번역기 초기화
+    from .translator.claude_client import ClaudeTranslator
+    claude_translator = None
+    claude_api_key = os.getenv("CLAUDE_API_KEY") or settings.claude_api_key
+    if claude_api_key:
+        claude_translator = ClaudeTranslator(api_key=claude_api_key)
+        masked = claude_api_key[:8] + "..." + claude_api_key[-4:] if len(claude_api_key) > 12 else "***"
+        logger.info(f"Claude 번역기 초기화 완료 (키: {masked})")
+    else:
+        logger.warning("CLAUDE_API_KEY 미설정 — Gemini 폴백 사용")
 
-        # translation 라우터에 참조 업데이트
-        translation.configure(artist_session, gb_translator)
-        registration.configure(artist_session, gb_translator)
+    # GB 번역기 초기화 (Claude 우선, Gemini 폴백)
+    from .translator.gb_translator import GBProductTranslator
+    base = translator if (translator and translator._initialized) else None
+    gb_translator = GBProductTranslator(
+        base_translator=base,
+        claude_translator=claude_translator,
+    )
+    if gb_translator.is_initialized:
+        logger.info("GB 번역기 초기화 완료")
+    else:
+        logger.warning("GB 번역기 초기화 실패 — Claude/Gemini 모두 사용 불가")
+
+    # translation 라우터에 참조 업데이트
+    translation.configure(artist_session, gb_translator)
+    registration.configure(artist_session, gb_translator)
 
     # v1 라우터에 참조 주입
     v1.update_refs(scraper, translator)

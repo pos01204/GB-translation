@@ -1,10 +1,11 @@
 """
 GB 등록용 번역 서비스
 
-기존 gemini_client.py의 ProductTranslator를 래핑하여
+Claude(우선) 또는 Gemini(폴백)를 사용하여
 GB 등록에 특화된 번역 로직을 제공합니다.
 
 주요 차이점:
+- Claude 우선, Gemini 폴백 LLM 전략
 - GB 전용 프롬프트 사용 (HTML 구조 보존, 글로벌 마켓 톤)
 - DomesticProduct → GlobalProductData 변환
 - 영어/일본어 동시 번역 지원
@@ -20,6 +21,7 @@ import httpx
 from ..models.domestic import DomesticProduct, DomesticOption
 from ..models.global_product import GlobalProductData, LanguageData, GlobalOption, ImageText
 from ..config import settings
+from .claude_client import ClaudeTranslator
 
 from ..prompts import (
     GB_TITLE_PROMPT_EN, GB_DESCRIPTION_PROMPT_EN,
@@ -36,27 +38,28 @@ logger = logging.getLogger(__name__)
 class GBProductTranslator:
     """GB 등록 전용 번역기
 
-    기존 ProductTranslator의 Gemini 클라이언트를 재활용하면서
+    Claude를 우선 사용하고, 미설정 시 Gemini로 폴백합니다.
     GB 등록에 최적화된 프롬프트와 후처리 로직을 적용합니다.
 
     Usage:
-        from app.translator import ProductTranslator
-        base = ProductTranslator(api_key="...")
-        gb = GBProductTranslator(base)
+        from app.translator.claude_client import ClaudeTranslator
+        claude = ClaudeTranslator(api_key="...")
+        gb = GBProductTranslator(claude_translator=claude)
         result = await gb.translate_for_gb(domestic_product, ["en", "ja"])
     """
 
-    def __init__(self, base_translator):
+    def __init__(self, base_translator=None, claude_translator: ClaudeTranslator = None):
         """
         Args:
-            base_translator: 기존 ProductTranslator 인스턴스
-                             (Gemini 클라이언트, rate limiter 포함)
+            base_translator: 기존 ProductTranslator 인스턴스 (Gemini 폴백)
+            claude_translator: ClaudeTranslator 인스턴스 (우선 사용)
         """
-        self.translator = base_translator
+        self.translator = base_translator  # Gemini (legacy)
+        self.claude = claude_translator    # Claude (primary)
 
     @property
     def is_initialized(self) -> bool:
-        return self.translator and self.translator._initialized
+        return bool(self.claude) or (self.translator and self.translator._initialized)
 
     async def translate_for_gb(
         self,
@@ -230,7 +233,7 @@ class GBProductTranslator:
             f"{keyword_prompt.format(text=chr(10).join(keywords))}"
         )
 
-        result = await self._call_gemini(combined_prompt, max_tokens=4000)
+        result = await self._call_llm(combined_prompt, max_tokens=4000)
 
         if result and "---" in result:
             parts = result.split("---")
@@ -270,7 +273,7 @@ class GBProductTranslator:
         )
         prompt = prompt_template.format(text=title)
 
-        result = await self._call_gemini(prompt)
+        result = await self._call_llm(prompt)
         if result:
             result = result.strip().strip('"').strip("'")
             return result
@@ -323,7 +326,7 @@ class GBProductTranslator:
         )
         prompt = prompt_template.format(text=combined)
 
-        result = await self._call_gemini(prompt, max_tokens=8000)
+        result = await self._call_llm(prompt, max_tokens=8000)
         if not result:
             fallback_html = f"<p>{domestic.title}</p>"
             fallback_blocks = [self._make_block("TEXT", domestic.title)]
@@ -605,7 +608,7 @@ class GBProductTranslator:
         )
         prompt = prompt_template.format(text=html)
 
-        result = await self._call_gemini(prompt, max_tokens=8000)
+        result = await self._call_llm(prompt, max_tokens=8000)
         return result if result else html
 
     async def _translate_keywords(
@@ -624,7 +627,7 @@ class GBProductTranslator:
         text = "\n".join(keywords)
         prompt = prompt_template.format(text=text)
 
-        result = await self._call_gemini(prompt)
+        result = await self._call_llm(prompt)
         if result:
             translated = [
                 kw.strip() for kw in result.strip().split("\n")
@@ -688,7 +691,7 @@ class GBProductTranslator:
             else GB_TITLE_PROMPT_JA
         )
         prompt = prompt_template.format(text=text)
-        result = await self._call_gemini(prompt)
+        result = await self._call_llm(prompt)
         if result:
             return result.strip().strip('"').strip("'")
         return text
@@ -709,7 +712,7 @@ class GBProductTranslator:
         text = "\n".join(values)
         prompt = prompt_template.format(text=text)
 
-        result = await self._call_gemini(prompt)
+        result = await self._call_llm(prompt)
         if result:
             translated = [v.strip() for v in result.strip().split("\n") if v.strip()]
             # 개수가 일치하는지 확인
@@ -773,6 +776,34 @@ class GBProductTranslator:
             high_res_url = self._get_high_res_url(raw_url)
 
             try:
+                # Claude OCR 경로
+                if self.claude:
+                    ocr_prompt = (
+                        "이 이미지에서 한국어 텍스트만 추출해주세요. "
+                        "텍스트가 없으면 'NO_TEXT'로 응답하세요."
+                    )
+                    text = await self.claude.ocr_image(high_res_url, ocr_prompt)
+                    if not text:
+                        text = await self.claude.ocr_image(raw_url, ocr_prompt)
+                    if text and text.strip() != "NO_TEXT" and len(text.strip()) >= 3:
+                        text = text.strip()
+                        # 이미지 데이터도 다운로드 (후속 처리용)
+                        image_data, mime = await self._download_image(high_res_url)
+                        if not image_data:
+                            image_data, mime = await self._download_image(raw_url)
+                        logger.info(f"  [{idx+1}] OCR 텍스트 (Claude): {text[:50]}...")
+                        results.append({
+                            "image_url": raw_url,
+                            "original_text": text,
+                            "order_index": idx,
+                            "image_data": image_data,
+                            "mime": mime,
+                        })
+                    else:
+                        logger.debug(f"  [{idx+1}] 텍스트 없음")
+                    continue
+
+                # Gemini 폴백 OCR 경로
                 await self.translator._wait_for_rate_limit()
 
                 # 고해상도 이미지 다운로드
@@ -832,19 +863,26 @@ class GBProductTranslator:
 
     # (이미지 생성 메서드 제거됨 — GB는 텍스트 중심 상세 설명 사용)
 
-    # ──────────────── Private: Gemini API 호출 ────────────────
+    # ──────────────── Private: LLM API 호출 ────────────────
 
-    async def _call_gemini(
+    async def _call_llm(self, prompt: str, max_tokens: int = 4000) -> Optional[str]:
+        """LLM API 호출 — Claude 우선, Gemini 폴백"""
+        if self.claude:
+            return await self.claude.translate(prompt, max_tokens)
+        # Gemini 폴백
+        return await self._call_gemini_legacy(prompt, max_tokens)
+
+    async def _call_gemini_legacy(
         self,
         prompt: str,
         max_tokens: int = 4000,
     ) -> Optional[str]:
         """
-        Gemini API 호출 (rate limiting + retry 포함)
+        Gemini API 호출 (rate limiting + retry 포함) — 레거시 폴백
 
         기존 ProductTranslator의 클라이언트를 직접 사용합니다.
         """
-        if not self.translator._initialized:
+        if not self.translator or not self.translator._initialized:
             logger.error("Gemini 클라이언트가 초기화되지 않았습니다")
             return None
 
