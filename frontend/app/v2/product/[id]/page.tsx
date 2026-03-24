@@ -1,9 +1,8 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import {
-  getDomesticData,
   translatePreview,
   registerSingle,
   getErrorMessage,
@@ -26,6 +25,7 @@ import {
   FileText,
   ChevronDown,
   ChevronUp,
+  RefreshCw,
 } from 'lucide-react'
 
 // ──────────── Collapsible Section ────────────
@@ -181,18 +181,47 @@ export default function ProductDetailPage() {
   // 언어 탭
   const [activeLang, setActiveLang] = useState<'en' | 'ja'>('en')
 
-  // 국내 데이터 로드
-  useEffect(() => {
+  // 국내 데이터 로드 (Playwright 기반이므로 120초 타임아웃)
+  const loadDomesticData = useCallback(async () => {
     if (!productId) return
     setDomesticLoading(true)
-    getDomesticData(productId)
-      .then((res) => {
-        if (res.success) setDomestic(res.data)
-        else setDomesticError('국내 데이터를 불러올 수 없습니다.')
-      })
-      .catch((err) => setDomesticError(getErrorMessage(err)))
-      .finally(() => setDomesticLoading(false))
+    setDomesticError('')
+    setDomestic(null)
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 120_000)
+
+    try {
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL ? (process.env.NEXT_PUBLIC_API_URL.startsWith('http') ? process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, '') : `https://${process.env.NEXT_PUBLIC_API_URL}`.replace(/\/$/, '')) : 'http://localhost:8000'}/api/v2/products/${productId}/domestic`,
+        { signal: controller.signal }
+      )
+      clearTimeout(timeoutId)
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(err.detail || `작품 상세 조회 실패 (${response.status})`)
+      }
+      const res = await response.json()
+      if (res.success) {
+        setDomestic(res.data)
+      } else {
+        setDomesticError(res.message || '국내 데이터를 불러올 수 없습니다.')
+      }
+    } catch (err: unknown) {
+      clearTimeout(timeoutId)
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setDomesticError('요청 시간이 초과되었습니다. 다시 시도해 주세요.')
+      } else {
+        setDomesticError(getErrorMessage(err))
+      }
+    } finally {
+      setDomesticLoading(false)
+    }
   }, [productId])
+
+  useEffect(() => {
+    loadDomesticData()
+  }, [loadDomesticData])
 
   // 번역 미리보기
   const handleTranslate = async () => {
@@ -247,9 +276,19 @@ export default function ProductDetailPage() {
   if (domesticLoading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="text-center">
-          <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-2" />
-          <p className="text-sm text-gray-500">국내 데이터 불러오는 중...</p>
+        <div className="text-center max-w-xs">
+          <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-orange-100 to-orange-200 flex items-center justify-center">
+            <Loader2 className="w-8 h-8 animate-spin text-orange-500" />
+          </div>
+          <p className="text-sm font-medium text-gray-700 mb-1">
+            작가웹에서 데이터를 불러오는 중입니다...
+          </p>
+          <p className="text-xs text-gray-400">
+            (최대 1분 소요)
+          </p>
+          <div className="mt-4 w-full bg-gray-100 rounded-full h-1 overflow-hidden">
+            <div className="h-full bg-orange-400 rounded-full animate-pulse" style={{ width: '60%' }} />
+          </div>
         </div>
       </div>
     )
@@ -266,9 +305,17 @@ export default function ProductDetailPage() {
           <ArrowLeft className="w-4 h-4" />
           목록으로
         </button>
-        <div className="p-6 bg-red-50 border border-red-200 rounded-lg text-center">
-          <XCircle className="w-8 h-8 text-red-400 mx-auto mb-2" />
-          <p className="text-sm text-red-700">{domesticError}</p>
+        <div className="p-8 bg-red-50 border border-red-200 rounded-xl text-center">
+          <XCircle className="w-10 h-10 text-red-400 mx-auto mb-3" />
+          <p className="text-sm font-medium text-red-700 mb-1">데이터를 불러오지 못했습니다</p>
+          <p className="text-xs text-red-500 mb-4">{domesticError}</p>
+          <button
+            onClick={loadDomesticData}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-red-200 text-red-600 rounded-lg text-sm font-medium hover:bg-red-50 transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+            재시도
+          </button>
         </div>
       </div>
     )

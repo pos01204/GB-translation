@@ -145,8 +145,8 @@ class ArtistWebSession:
         """
         작품 목록 조회
 
-        전략 1: 네트워크 API 응답 가로채기 (idus.com 도메인 한정)
-        전략 2: DOM 스크래핑 (링크 그룹핑 방식)
+        전략 1: 브라우저 내 fetch()로 idus aggregator API 직접 호출
+        전략 2: DOM 스크래핑 (링크 그룹핑 방식) - 폴백
 
         Args:
             status: "selling" | "paused" | "draft"
@@ -157,7 +157,94 @@ class ArtistWebSession:
         if not await self.is_authenticated():
             raise Exception("로그인이 필요합니다")
 
-        # 상태에 따른 URL
+        # ── 전략 1: 브라우저 내 fetch()로 API 직접 호출 ──
+        api_path_map = {
+            "selling": "/api/v1/product/public/sale/paging",
+            "paused": "/api/v1/product/public/pause/paging",
+            "draft": "/api/v1/product/public/draft/paging",
+        }
+        api_path = api_path_map.get(status, api_path_map["selling"])
+        api_base = "https://artist-aggregator.idus.com"
+
+        try:
+            all_products = []
+            page_num = 0
+            max_pages = 50  # 안전장치
+
+            while page_num < max_pages:
+                api_url = (
+                    f"{api_base}{api_path}"
+                    f"?page={page_num}&sort=&query=&management_category_id=0"
+                )
+                logger.info(f"[API 직접호출] page={page_num}, URL: {api_url}")
+
+                # 브라우저 컨텍스트 내에서 fetch 실행 (쿠키 자동 포함)
+                api_response = await self.page.evaluate("""
+                    async (url) => {
+                        try {
+                            const resp = await fetch(url, {
+                                method: 'GET',
+                                credentials: 'include',
+                                headers: {
+                                    'Accept': 'application/json',
+                                },
+                            });
+                            if (!resp.ok) {
+                                return { error: `HTTP ${resp.status}`, status: resp.status };
+                            }
+                            const data = await resp.json();
+                            return { ok: true, data: data };
+                        } catch (e) {
+                            return { error: e.message };
+                        }
+                    }
+                """, api_url)
+
+                if not api_response or api_response.get("error"):
+                    error_msg = api_response.get("error", "unknown") if api_response else "null response"
+                    logger.warning(f"[API 직접호출] 실패: {error_msg}")
+                    break
+
+                body = api_response.get("data")
+                if not body:
+                    logger.warning("[API 직접호출] 응답 데이터 없음")
+                    break
+
+                # 응답에서 작품 배열 추출
+                items = self._find_product_array(body)
+                if not items:
+                    logger.info(f"[API 직접호출] page={page_num}에서 작품 배열 없음, 종료")
+                    break
+
+                # 작품 데이터 파싱
+                page_products = self._parse_api_items(items, status)
+                if not page_products:
+                    logger.info(f"[API 직접호출] page={page_num}에서 파싱 결과 0건, 종료")
+                    break
+
+                all_products.extend(page_products)
+                logger.info(f"[API 직접호출] page={page_num}: {len(page_products)}개 추출 (누적: {len(all_products)})")
+
+                # 다음 페이지 존재 여부 확인
+                # totalPages / last / totalElements 등 다양한 구조 대응
+                has_next = self._check_has_next_page(body, page_num, len(items))
+                if not has_next:
+                    break
+
+                page_num += 1
+
+            if all_products:
+                logger.info(f"[API 직접호출 성공] 총 {len(all_products)}개 작품 ({status})")
+                return all_products
+            else:
+                logger.info("[API 직접호출] 작품 0건, DOM 스크래핑으로 전환")
+
+        except Exception as e:
+            logger.warning(f"API 직접호출 실패: {e}")
+
+        # ── 전략 2: DOM 스크래핑 (링크 그룹핑 방식) - 폴백 ──
+        logger.info("DOM 스크래핑으로 전환...")
+
         url_map = {
             "selling": "/product/list",
             "paused": "/product/list/pause",
@@ -165,56 +252,17 @@ class ArtistWebSession:
         }
         target_url = f"{settings.artist_web_base_url}{url_map.get(status, '/product/list')}"
 
-        # ── 전략 1: 네트워크 API 응답 가로채기 ──
-        captured_responses = []
-
-        async def capture_api(response):
-            """idus.com 도메인의 JSON 응답만 캡처"""
-            try:
-                url = response.url
-                # idus.com 도메인 API만 캡처 (자체 백엔드 제외)
-                if response.status == 200 and "idus.com" in url:
-                    content_type = response.headers.get("content-type", "")
-                    if "json" in content_type:
-                        body = await response.json()
-                        captured_responses.append({"url": url, "body": body})
-                        logger.info(f"[API 캡처] URL: {url}, type: {type(body).__name__}")
-            except Exception:
-                pass
-
-        self.page.on("response", capture_api)
-
         try:
             await self.page.goto(target_url, timeout=settings.page_load_timeout)
-            await self.page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
-
-            # 캡처된 응답에서 작품 데이터 추출
-            api_products = self._extract_from_api_responses(captured_responses, status)
-            if api_products:
-                logger.info(f"[API 캡처 성공] {len(api_products)}개 작품 ({status})")
-                return api_products
-            else:
-                logger.info(f"[API 캡처] 작품 데이터 없음. 캡처된 응답 {len(captured_responses)}건")
-                for r in captured_responses[:5]:
-                    logger.info(f"  - {r['url']}")
-
+            await self.page.wait_for_load_state("domcontentloaded")
+            await asyncio.sleep(3)  # SPA 렌더링 대기
         except Exception as e:
-            logger.warning(f"API 캡처 실패: {e}")
-        finally:
-            self.page.remove_listener("response", capture_api)
-
-        # ── 전략 2: DOM 스크래핑 (링크 그룹핑 방식) ──
-        logger.info("DOM 스크래핑으로 전환...")
-
-        if "product" not in self.page.url:
-            await self.page.goto(target_url, timeout=settings.page_load_timeout)
-            await self.page.wait_for_load_state("networkidle")
+            logger.warning(f"DOM 스크래핑 페이지 로딩 실패: {e}")
 
         # 콘텐츠 로딩 대기
         try:
             await self.page.wait_for_selector(
-                'a[href*="/product/"]', timeout=10000
+                'a[href*="/product/"]', timeout=15000
             )
         except Exception:
             logger.warning("작품 링크 요소를 찾지 못함")
@@ -222,7 +270,7 @@ class ArtistWebSession:
         # 무한스크롤 대응
         await self._scroll_to_load_all()
 
-        # 핵심 변경: 링크를 UUID 별로 그룹핑하여 추출
+        # 링크를 UUID 별로 그룹핑하여 추출
         products_raw = await self.page.evaluate("""
             () => {
                 const results = [];
@@ -243,17 +291,32 @@ class ArtistWebSession:
                 // 2단계: 각 UUID에 대해 데이터 추출
                 for (const [productId, links] of Object.entries(linksByProductId)) {
 
-                    // 제목: 텍스트가 있는 링크에서 추출 (이미지만 있는 링크 제외)
+                    // 제목: 가장 짧은 의미있는 텍스트를 가진 링크에서 추출
                     let title = '';
+                    let bestTitleLength = Infinity;
                     for (const link of links) {
-                        const text = link.textContent.trim();
-                        // 통계 라벨이 아닌, 의미 있는 텍스트
-                        if (text && text.length > 3
+                        // 링크 내 직접 텍스트 노드만 추출 (자식 요소 텍스트 제외)
+                        const directText = Array.from(link.childNodes)
+                            .filter(n => n.nodeType === Node.TEXT_NODE || (n.nodeType === Node.ELEMENT_NODE && !n.querySelector('img')))
+                            .map(n => n.textContent.trim())
+                            .join(' ')
+                            .trim();
+
+                        // 이미지만 있는 링크는 건너뜀
+                        if (link.querySelector('img') && !directText) continue;
+
+                        const text = directText || link.textContent.trim();
+                        if (text && text.length > 3 && text.length < bestTitleLength
                             && !text.match(/^(남은수량|주문시|후기|판매수|찜|\\d)/)
                             && !text.match(/^\\d+[%원개건]/)
                         ) {
-                            title = text;
-                            break;
+                            // 제목으로 적합한 텍스트: 카드 전체 텍스트가 아닌 제목 부분만
+                            // 개행이 포함되면 첫 줄만 사용
+                            const firstLine = text.split('\\n')[0].trim();
+                            if (firstLine.length > 3) {
+                                title = firstLine;
+                                bestTitleLength = firstLine.length;
+                            }
                         }
                     }
 
@@ -270,7 +333,6 @@ class ArtistWebSession:
                     // 카드 컨테이너 찾기: 모든 링크를 포함하는 공통 조상
                     let card = null;
                     if (links.length >= 2) {
-                        // 두 링크의 공통 조상 탐색
                         let el = links[0];
                         for (let i = 0; i < 8; i++) {
                             el = el.parentElement;
@@ -282,7 +344,6 @@ class ArtistWebSession:
                         }
                     }
                     if (!card) {
-                        // 링크 1개인 경우, 3단계 상위 탐색
                         card = links[0].parentElement?.parentElement?.parentElement
                             || links[0].parentElement?.parentElement
                             || links[0].parentElement;
@@ -291,13 +352,11 @@ class ArtistWebSession:
                     // 가격: 카드 내에서 "X,XXX원" 패턴 매칭
                     let priceText = '0';
                     if (card) {
-                        // 가격 요소를 직접 찾기
                         const priceEl = card.querySelector('[class*="price"], [class*="Price"]');
                         if (priceEl) {
                             const match = priceEl.textContent.match(/(\\d{1,3}(?:,\\d{3})*)\\s*원/);
                             priceText = match ? match[0] : '0';
                         } else {
-                            // 카드 텍스트에서 첫 번째 가격 패턴 매칭
                             const cardText = card.innerText || '';
                             const match = cardText.match(/(\\d{1,3}(?:,\\d{3})*)\\s*원/);
                             priceText = match ? match[0] : '0';
@@ -357,81 +416,100 @@ class ArtistWebSession:
         logger.info(f"[DOM 스크래핑] {len(result)}개 작품 추출 ({status})")
         return result
 
-    def _extract_from_api_responses(
-        self, responses: list[dict], status: str
+    def _parse_api_items(
+        self, items: list, status: str
     ) -> list[ProductSummary]:
-        """캡처된 API 응답에서 작품 목록을 추출"""
-        for resp in responses:
-            body = resp.get("body")
-            if not body:
+        """API 응답의 작품 배열을 ProductSummary 리스트로 변환"""
+        result = []
+        for item in items:
+            if not isinstance(item, dict):
                 continue
 
-            # 다양한 API 응답 구조에서 배열 추출
-            items = self._find_product_array(body)
-            if not items or len(items) < 2:
+            # UUID 형식의 ID 필드 탐색
+            product_id = None
+            for key in ("product_id", "productId", "uuid", "id"):
+                val = item.get(key)
+                if val and isinstance(val, str) and len(val) >= 32:
+                    product_id = val
+                    break
+
+            if not product_id:
                 continue
 
-            # 작품 데이터인지 확인
-            result = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
+            title = (
+                item.get("title")
+                or item.get("name")
+                or item.get("productName")
+                or item.get("product_name", "")
+            )
+            price = item.get("price") or item.get("salePrice") or item.get("sale_price") or 0
+            if isinstance(price, str):
+                price = self._parse_price(price)
 
-                # UUID 형식의 ID 필드 탐색
-                product_id = None
-                for key in ("product_id", "productId", "uuid", "id"):
-                    val = item.get(key)
-                    if val and isinstance(val, str) and len(val) >= 32:
-                        product_id = val
-                        break
+            thumbnail = (
+                item.get("thumbnail_url")
+                or item.get("thumbnailUrl")
+                or item.get("image")
+                or item.get("imageUrl")
+                or item.get("representative_image")
+                or item.get("thumbnail")
+                or item.get("img")
+            )
 
-                if not product_id:
-                    continue
+            has_global = bool(
+                item.get("global_status")
+                or item.get("globalStatus")
+                or item.get("hasGlobal")
+                or item.get("is_global")
+            )
 
-                title = (
-                    item.get("title")
-                    or item.get("name")
-                    or item.get("productName")
-                    or item.get("product_name", "")
-                )
-                price = item.get("price") or item.get("salePrice") or item.get("sale_price") or 0
-                if isinstance(price, str):
-                    price = self._parse_price(price)
+            result.append(ProductSummary(
+                product_id=str(product_id),
+                title=str(title) if title else "",
+                price=int(price) if price else 0,
+                thumbnail_url=str(thumbnail) if thumbnail else None,
+                status=ProductStatus(status),
+                global_status=(
+                    GlobalStatus.REGISTERED if has_global
+                    else GlobalStatus.NOT_REGISTERED
+                ),
+            ))
 
-                thumbnail = (
-                    item.get("thumbnail_url")
-                    or item.get("thumbnailUrl")
-                    or item.get("image")
-                    or item.get("imageUrl")
-                    or item.get("representative_image")
-                    or item.get("thumbnail")
-                    or item.get("img")
-                )
+        return result
 
-                has_global = bool(
-                    item.get("global_status")
-                    or item.get("globalStatus")
-                    or item.get("hasGlobal")
-                    or item.get("is_global")
-                )
+    @staticmethod
+    def _check_has_next_page(body: dict, current_page: int, items_count: int) -> bool:
+        """API 응답에서 다음 페이지 존재 여부 확인"""
+        if not isinstance(body, dict):
+            return items_count >= 20  # 기본 페이지 사이즈 추정
 
-                result.append(ProductSummary(
-                    product_id=str(product_id),
-                    title=str(title) if title else "",
-                    price=int(price) if price else 0,
-                    thumbnail_url=str(thumbnail) if thumbnail else None,
-                    status=ProductStatus(status),
-                    global_status=(
-                        GlobalStatus.REGISTERED if has_global
-                        else GlobalStatus.NOT_REGISTERED
-                    ),
-                ))
+        # 다양한 구조 대응
+        def _find_pagination_info(obj):
+            if not isinstance(obj, dict):
+                return None
+            # 직접 pagination 필드 확인
+            for key in ("totalPages", "total_pages"):
+                if key in obj:
+                    total_pages = obj[key]
+                    return current_page < (total_pages - 1)
+            if "last" in obj and isinstance(obj["last"], bool):
+                return not obj["last"]
+            if "hasNext" in obj or "has_next" in obj:
+                return bool(obj.get("hasNext") or obj.get("has_next"))
+            # 중첩 탐색
+            for val in obj.values():
+                if isinstance(val, dict):
+                    result = _find_pagination_info(val)
+                    if result is not None:
+                        return result
+            return None
 
-            if result:
-                logger.info(f"API 응답에서 {len(result)}개 작품 추출 (URL: {resp.get('url', '?')})")
-                return result
+        has_next = _find_pagination_info(body)
+        if has_next is not None:
+            return has_next
 
-        return []
+        # pagination 정보 없으면 아이템 수로 추정 (20개 이상이면 다음 페이지 있을 수 있음)
+        return items_count >= 20
 
     @staticmethod
     def _find_product_array(body) -> list | None:
@@ -523,8 +601,29 @@ class ArtistWebSession:
             raise Exception("로그인이 필요합니다")
 
         url = f"{settings.artist_web_base_url}/product/{product_id}"
-        await self.page.goto(url, timeout=settings.page_load_timeout)
-        await self.page.wait_for_load_state("networkidle")
+
+        try:
+            await self.page.goto(url, timeout=settings.page_load_timeout)
+            await self.page.wait_for_load_state("domcontentloaded")
+            # SPA 렌더링 대기 — networkidle 대신 고정 대기
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.warning(f"작품 페이지 로딩 중 타임아웃 (재시도): {e}")
+            try:
+                # 재시도: 이미 네비게이션 진행 중이므로 load만 대기
+                await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
+                await asyncio.sleep(2)
+            except Exception as e2:
+                logger.error(f"작품 페이지 로딩 재시도도 실패: {e2}")
+
+        # 추가 SPA 렌더링 대기 — 주요 콘텐츠 요소 탐색
+        try:
+            await self.page.wait_for_selector(
+                'input, textarea, [contenteditable], img[src*="idus"]',
+                timeout=10000,
+            )
+        except Exception:
+            logger.warning("작품 페이지 콘텐츠 요소 대기 타임아웃 (계속 진행)")
 
         # 페이지 로딩 확인
         success = "product" in self.page.url

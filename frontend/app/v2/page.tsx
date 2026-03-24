@@ -142,6 +142,24 @@ function GlobalStatusBadge({ status }: { status: string }) {
   )
 }
 
+// ──────────── Helpers ────────────
+/**
+ * 작가웹에서 가져온 title 텍스트에서 가격/수량/후기 등
+ * 불필요하게 이어 붙은 부분을 잘라낸다.
+ */
+function cleanProductTitle(raw: string): string {
+  if (!raw) return '(제목 없음)'
+  // 가격 패턴(숫자+원) 이후를 모두 제거
+  let cleaned = raw.replace(/\s*\d{1,3}(,\d{3})*원[\s\S]*$/, '')
+  // 퍼센트 할인 패턴 이후 제거 (예: "19% ...")
+  cleaned = cleaned.replace(/\s*\d+%\s*[\s\S]*$/, '')
+  // "남은수량", "주문시", "후기", "판" 등이 나오면 그 이전까지만
+  cleaned = cleaned.replace(/\s*(남은수량|주문시|후기|판매|리뷰|품절)[\s\S]*$/, '')
+  // 양쪽 공백 정리
+  cleaned = cleaned.trim()
+  return cleaned || raw.trim()
+}
+
 // ──────────── ProductCard ────────────
 function ProductCard({
   product,
@@ -154,30 +172,41 @@ function ProductCard({
   onToggle: () => void
   onClick: () => void
 }) {
+  const [imgError, setImgError] = useState(false)
+  const displayTitle = cleanProductTitle(product.title)
+
   return (
     <div
-      className={`flex items-center gap-3 p-3 rounded-lg border transition-colors hover:bg-gray-50 ${
-        selected ? 'border-orange-300 bg-orange-50/50' : 'border-gray-200'
+      onClick={onClick}
+      className={`group flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all duration-150 ${
+        selected
+          ? 'border-orange-300 bg-orange-50/50 shadow-sm'
+          : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50 hover:shadow-sm'
       }`}
     >
       {/* 체크박스 */}
       <input
         type="checkbox"
         checked={selected}
-        onChange={onToggle}
+        onChange={(e) => {
+          e.stopPropagation()
+          onToggle()
+        }}
+        onClick={(e) => e.stopPropagation()}
         className="w-4 h-4 rounded border-gray-300 text-orange-500 focus:ring-orange-500 shrink-0"
       />
 
       {/* 썸네일 */}
-      <div className="w-14 h-14 rounded-lg bg-gray-100 overflow-hidden shrink-0">
-        {product.thumbnail_url ? (
+      <div className="w-16 h-16 rounded-xl bg-gray-100 overflow-hidden shrink-0 border border-gray-200">
+        {product.thumbnail_url && !imgError ? (
           <img
             src={product.thumbnail_url}
-            alt={product.title}
+            alt={displayTitle}
             className="w-full h-full object-cover"
+            onError={() => setImgError(true)}
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center">
+          <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100">
             <Package className="w-6 h-6 text-gray-300" />
           </div>
         )}
@@ -185,28 +214,29 @@ function ProductCard({
 
       {/* 작품 정보 */}
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-gray-900 truncate">
-          {product.title}
+        <p
+          className="text-sm font-medium text-gray-900 line-clamp-2 leading-snug"
+          title={product.title}
+        >
+          {displayTitle}
         </p>
-        <div className="flex items-center gap-2 mt-1">
-          <span className="text-xs text-gray-500">
-            {product.price?.toLocaleString()}원
-          </span>
+        <div className="flex items-center gap-2 mt-1.5">
+          {product.price > 0 && (
+            <span className="text-sm font-semibold text-gray-800">
+              {product.price.toLocaleString()}
+              <span className="text-xs font-normal text-gray-500">원</span>
+            </span>
+          )}
           <GlobalStatusBadge status={product.global_status} />
         </div>
       </div>
 
       {/* 상세 보기 버튼 */}
-      <button
-        onClick={(e) => {
-          e.stopPropagation()
-          onClick()
-        }}
-        className="p-1.5 rounded-md hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors shrink-0"
-        title="번역 미리보기"
+      <div
+        className="p-2 rounded-lg text-gray-300 group-hover:text-gray-500 group-hover:bg-gray-100 transition-colors shrink-0"
       >
         <ChevronRight className="w-4 h-4" />
-      </button>
+      </div>
     </div>
   )
 }

@@ -4,6 +4,7 @@
 작가웹의 작품 수정 페이지(국내 탭)에서
 제목, 가격, 이미지, 설명, 옵션, 키워드 등 전체 데이터를 추출합니다.
 """
+import asyncio
 import re
 import logging
 from typing import Optional
@@ -40,6 +41,9 @@ class ProductReader:
         전제: 이미 /product/{product_id} 페이지에 위치
         국내 탭이 기본 선택 상태여야 함
         """
+        # SPA 콘텐츠 로딩 대기 — 이미지/폼 요소가 렌더링될 때까지
+        await self._wait_for_content_ready()
+
         # 국내 탭 활성화 확인
         await self._ensure_domestic_tab()
 
@@ -94,6 +98,45 @@ class ProductReader:
 
     # ──────────────────── Private Methods ────────────────────
 
+    async def _wait_for_content_ready(self):
+        """SPA 페이지의 콘텐츠가 완전히 렌더링될 때까지 대기"""
+        # 1단계: 기본 폼 요소 대기
+        try:
+            await self.page.wait_for_selector(
+                'input, textarea, [contenteditable]',
+                timeout=15000,
+            )
+        except Exception:
+            logger.warning("폼 요소 대기 타임아웃")
+
+        # 2단계: 이미지 요소 대기 (idus 이미지)
+        try:
+            await self.page.wait_for_selector(
+                'img[src*="idus"], img[src*="image."], img[data-src]',
+                timeout=10000,
+            )
+        except Exception:
+            logger.debug("이미지 요소 대기 타임아웃 (이미지 없는 작품일 수 있음)")
+
+        # 3단계: 추가 렌더링 대기
+        await asyncio.sleep(2)
+
+        # 디버깅: 현재 페이지 상태 로깅
+        try:
+            page_state = await self.page.evaluate("""
+                () => ({
+                    url: window.location.href,
+                    imgCount: document.querySelectorAll('img').length,
+                    idusImgCount: document.querySelectorAll('img[src*="idus"], img[src*="image."]').length,
+                    inputCount: document.querySelectorAll('input').length,
+                    textareaCount: document.querySelectorAll('textarea').length,
+                    formCount: document.querySelectorAll('form').length,
+                })
+            """)
+            logger.info(f"페이지 콘텐츠 상태: {page_state}")
+        except Exception:
+            pass
+
     async def _ensure_domestic_tab(self):
         """국내 탭이 활성화되어 있는지 확인하고, 아니면 클릭"""
         try:
@@ -107,6 +150,7 @@ class ProductReader:
                 if is_active != "true" and data_state != "active":
                     await domestic_tab.click()
                     await self.page.wait_for_timeout(settings.artist_web_navigation_delay)
+                    await asyncio.sleep(1)  # 탭 전환 후 렌더링 대기
                     logger.info("국내 탭 활성화")
         except Exception as e:
             logger.warning(f"국내 탭 전환 시도 중 오류 (무시): {e}")
@@ -213,18 +257,74 @@ class ProductReader:
         """작품 이미지 URL 및 순서 추출"""
         images = []
         try:
-            img_elements = self.page.locator(
-                'img[src*="image.idus.com"], img[src*="idus-file"]'
-            )
-            count = await img_elements.count()
-            for i in range(min(count, 9)):  # 최대 9장
-                src = await img_elements.nth(i).get_attribute('src')
-                if src and 'thumbnail' not in src.lower():
-                    images.append(ProductImage(
-                        url=src,
-                        order=i,
-                        is_representative=(i == 0),
-                    ))
+            # JavaScript로 이미지 추출 (더 넓은 범위의 셀렉터 사용)
+            images_data = await self.page.evaluate("""
+                () => {
+                    const results = [];
+                    const seen = new Set();
+
+                    // 1. idus 이미지 서버의 모든 img 태그
+                    const imgSelectors = [
+                        'img[src*="image.idus.com"]',
+                        'img[src*="idus-file"]',
+                        'img[src*="idus"]',
+                        'img[src*="cloudfront"]',
+                    ];
+
+                    for (const selector of imgSelectors) {
+                        const imgs = document.querySelectorAll(selector);
+                        for (const img of imgs) {
+                            const src = img.src || img.dataset?.src || img.getAttribute('data-src') || '';
+                            if (!src || seen.has(src)) continue;
+                            // 아이콘/로고/썸네일 필터링
+                            if (src.includes('logo') || src.includes('icon')) continue;
+                            // 너무 작은 이미지 제외 (아이콘일 가능성)
+                            const w = img.naturalWidth || img.width || 0;
+                            const h = img.naturalHeight || img.height || 0;
+                            if (w > 0 && w < 50 && h > 0 && h < 50) continue;
+                            seen.add(src);
+                            results.push(src);
+                        }
+                    }
+
+                    // 2. background-image에서 idus 이미지 추출
+                    const allEls = document.querySelectorAll('[style*="background-image"]');
+                    for (const el of allEls) {
+                        const style = el.getAttribute('style') || '';
+                        const match = style.match(/url\\(['"]?(https?:\\/\\/[^'"\\)]*idus[^'"\\)]*)/);
+                        if (match && !seen.has(match[1])) {
+                            seen.add(match[1]);
+                            results.push(match[1]);
+                        }
+                    }
+
+                    return results;
+                }
+            """)
+
+            for i, src in enumerate(images_data[:9]):  # 최대 9장
+                images.append(ProductImage(
+                    url=src,
+                    order=i,
+                    is_representative=(i == 0),
+                ))
+
+            if not images:
+                # 디버깅: 페이지의 모든 이미지 정보 로깅
+                debug_info = await self.page.evaluate("""
+                    () => {
+                        const allImgs = document.querySelectorAll('img');
+                        return Array.from(allImgs).slice(0, 20).map(img => ({
+                            src: (img.src || '').substring(0, 120),
+                            dataSrc: (img.dataset?.src || '').substring(0, 120),
+                            width: img.width,
+                            height: img.height,
+                            alt: img.alt || '',
+                        }));
+                    }
+                """)
+                logger.warning(f"이미지 0건. 페이지 내 img 태그 샘플: {debug_info}")
+
         except Exception as e:
             logger.warning(f"이미지 추출 실패: {e}")
         return images
@@ -309,31 +409,32 @@ class ProductReader:
         """옵션 목록 추출"""
         options = []
         try:
-            # JavaScript로 옵션 데이터 추출 (DOM 구조 의존도를 낮추기 위해)
+            # JavaScript로 옵션 데이터 추출 — 여러 전략 시도
             options_data = await self.page.evaluate("""
                 () => {
                     const result = [];
-                    // 옵션 그룹 찾기
+
+                    // 전략 1: 옵션 섹션 내 input 필드에서 추출
                     const optionSections = document.querySelectorAll(
                         '[class*="option"], [class*="Option"]'
                     );
                     for (const section of optionSections) {
                         const nameEl = section.querySelector(
-                            'input[placeholder*="옵션명"], [class*="name"] input'
+                            'input[placeholder*="옵션명"], [class*="name"] input, input[placeholder*="옵션"]'
                         );
                         if (!nameEl) continue;
                         const name = nameEl.value;
                         if (!name) continue;
 
-                        // 옵션값 목록
                         const values = [];
                         const valueEls = section.querySelectorAll(
-                            '[class*="value"] input, [class*="item"] input'
+                            '[class*="value"] input, [class*="item"] input, [class*="chip"], [class*="tag"]'
                         );
                         for (const valEl of valueEls) {
-                            if (valEl.value) {
+                            const val = valEl.value || valEl.textContent?.trim();
+                            if (val && val !== name && val !== 'x' && val !== '×') {
                                 values.push({
-                                    value: valEl.value,
+                                    value: val,
                                     additional_price: 0,
                                 });
                             }
@@ -343,6 +444,53 @@ class ProductReader:
                             result.push({ name, values, option_type: "basic" });
                         }
                     }
+
+                    if (result.length > 0) return result;
+
+                    // 전략 2: "옵션" 텍스트 라벨 근처의 input/select 요소
+                    const labels = document.querySelectorAll('label, div, span, p');
+                    for (const label of labels) {
+                        const text = label.textContent?.trim();
+                        if (!text || !text.includes('옵션') || text.length > 30) continue;
+
+                        // 형제 또는 부모 컨테이너에서 input 탐색
+                        const container = label.closest('[class*="option"], [class*="Option"], [class*="row"], [class*="group"]')
+                            || label.parentElement;
+                        if (!container) continue;
+
+                        const inputs = container.querySelectorAll('input:not([type="hidden"]), select');
+                        for (const input of inputs) {
+                            const val = input.value;
+                            if (val) {
+                                result.push({
+                                    name: text.replace(/[:\\s]*$/, ''),
+                                    values: [{ value: val, additional_price: 0 }],
+                                    option_type: "basic",
+                                });
+                                break;
+                            }
+                        }
+                    }
+
+                    // 전략 3: 페이지의 모든 input에서 옵션 관련 필드 탐색
+                    if (result.length === 0) {
+                        const allInputs = document.querySelectorAll('input');
+                        for (const input of allInputs) {
+                            const placeholder = input.placeholder || '';
+                            const name = input.name || '';
+                            if ((placeholder + name).toLowerCase().includes('option') ||
+                                (placeholder + name).includes('옵션')) {
+                                if (input.value) {
+                                    result.push({
+                                        name: placeholder || name || '옵션',
+                                        values: [{ value: input.value, additional_price: 0 }],
+                                        option_type: "basic",
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     return result;
                 }
             """)
@@ -359,6 +507,25 @@ class ProductReader:
                     ],
                     option_type=opt_data.get("option_type", "basic"),
                 ))
+
+            if not options:
+                # 디버깅: 옵션 관련 DOM 정보 로깅
+                debug_info = await self.page.evaluate("""
+                    () => {
+                        const optionEls = document.querySelectorAll('[class*="option"], [class*="Option"]');
+                        return {
+                            optionElementCount: optionEls.length,
+                            samples: Array.from(optionEls).slice(0, 5).map(el => ({
+                                tag: el.tagName,
+                                classes: el.className?.toString().substring(0, 100),
+                                inputCount: el.querySelectorAll('input').length,
+                                text: el.textContent?.trim().substring(0, 100),
+                            })),
+                        };
+                    }
+                """)
+                logger.info(f"옵션 0건. DOM 옵션 요소 정보: {debug_info}")
+
         except Exception as e:
             logger.warning(f"옵션 추출 실패: {e}")
         return options
