@@ -38,6 +38,8 @@ class ArtistWebSession:
         self._initialized = False
         self._last_api_raw_sample: dict | None = None
         self._product_list_cache: dict = {}  # {status: (timestamp, products)}
+        self._saved_email: Optional[str] = None
+        self._saved_password: Optional[str] = None
 
     async def initialize(self):
         """Playwright 브라우저 초기화"""
@@ -118,6 +120,9 @@ class ArtistWebSession:
                 timeout=settings.artist_web_login_timeout,
             )
             self._authenticated = True
+            # 자동 재로그인용 인증 정보 저장 (컨테이너 재시작 대비)
+            self._saved_email = email
+            self._saved_password = password
             logger.info("작가웹 로그인 성공")
             return True
 
@@ -127,10 +132,24 @@ class ArtistWebSession:
             return False
 
     async def is_authenticated(self) -> bool:
-        """인증 상태 확인 — _authenticated 플래그 기반 (URL 체크 제거)"""
-        # 로그인 성공 시 _authenticated=True로 설정됨
-        # 페이지 URL 체크 제거: 디버그/네비게이션으로 URL이 변할 수 있어 불안정
-        return self._authenticated and self.page is not None
+        """인증 상태 확인 + 자동 재로그인 (컨테이너 재시작 대비)"""
+        if self._authenticated and self.page is not None:
+            return True
+
+        # 저장된 인증 정보가 있으면 자동 재로그인 시도
+        if self._saved_email and self._saved_password:
+            logger.info("세션 만료 감지 — 저장된 인증 정보로 자동 재로그인 시도")
+            try:
+                # 브라우저가 없으면 재초기화
+                if not self.page or not self._initialized:
+                    self._initialized = False  # 재초기화 허용
+                    await self.initialize()
+                return await self.login(self._saved_email, self._saved_password)
+            except Exception as e:
+                logger.error(f"자동 재로그인 실패: {e}")
+                return False
+
+        return False
 
     async def get_session_info(self) -> dict:
         """현재 세션 상태 정보 반환"""

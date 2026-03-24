@@ -594,9 +594,16 @@ export default function ProductDetailPage() {
         message: result.message,
       })
     } catch (err) {
+      const errMsg = getErrorMessage(err)
+      // 401: 세션 만료 → 로그인 페이지로
+      if (errMsg.includes('401') || errMsg.includes('로그인')) {
+        alert('세션이 만료되었습니다. 다시 로그인해 주세요.')
+        router.push('/v2')
+        return
+      }
       setRegisterResult({
         success: false,
-        message: getErrorMessage(err),
+        message: errMsg,
       })
     } finally {
       setRegisterLoading(false)
