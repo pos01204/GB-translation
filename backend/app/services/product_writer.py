@@ -120,24 +120,49 @@ class ProductWriter:
                         return { success: false, error: 'Vuex store not found' };
                     }
                     const store = app.__vue__.$store;
+                    const gp = store.state.globalProduct || {};
 
-                    // 1. _detailUI 현재 상태 가져오기
-                    const currentUI = store.state.globalProduct?._detailUI;
-                    if (!currentUI) {
-                        return { success: false, error: '_detailUI not found' };
+                    // 1. _detail에서 krProductId(국내 작품 UUID) 확인
+                    const detail = gp._detail || {};
+                    const productForm = store.state.productForm?._item || {};
+                    // 국내 작품 UUID: _detail.uuid 또는 productForm.uuid 또는 URL에서 추출
+                    const krProductId = detail.uuid || productForm.uuid
+                        || window.location.pathname.match(/product\\/([a-f0-9-]{36})/)?.[1]
+                        || '';
+
+                    if (!krProductId) {
+                        return { success: false, error: 'krProductId를 찾을 수 없음' };
                     }
 
-                    // 2. setDetailUI mutation으로 데이터 설정
+                    // 2. _detail이 비어있으면 먼저 로드
+                    if (!detail.id || detail.status === 'EMPTY') {
+                        try {
+                            await store.dispatch('globalProduct/selectGlobalProductDetail', {
+                                productUuid: krProductId
+                            });
+                            // 로드 후 다시 확인
+                            await new Promise(r => setTimeout(r, 1000));
+                        } catch (e) {
+                            // 아직 등록 안 된 글로벌 작품이면 에러 무시
+                        }
+                    }
+
+                    // 3. _detailUI 현재 상태 가져오기
+                    const currentUI = gp._detailUI || {};
+
+                    // 4. setDetailUI mutation으로 데이터 설정 (krProductId 포함)
                     const newUI = {
                         ...currentUI,
                         productName: data.title || '',
                         images: data.images || [],
                         keywords: data.keywords || [],
                         premiumDescription: data.blocks || [],
+                        // action이 필요로 하는 추가 필드
+                        krProductId: krProductId,
                     };
                     store.commit('globalProduct/setDetailUI', newUI);
 
-                    // 3. 저장 action dispatch
+                    // 5. 저장 action dispatch
                     try {
                         const actionName = data.saveDraft
                             ? 'globalProduct/insertGlobalProductDraft'
@@ -146,6 +171,7 @@ class ProductWriter:
                         return {
                             success: true,
                             action: actionName,
+                            krProductId: krProductId,
                             injected: {
                                 title: (data.title || '').substring(0, 30),
                                 imageCount: (data.images || []).length,
@@ -158,6 +184,9 @@ class ProductWriter:
                             success: false,
                             error: 'dispatch 실패: ' + (err.message || String(err)),
                             mutation_ok: true,
+                            krProductId: krProductId,
+                            detailKeys: Object.keys(gp._detail || {}),
+                            detailUIKeys: Object.keys(newUI),
                         };
                     }
                 }

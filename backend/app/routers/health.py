@@ -1060,6 +1060,212 @@ async def debug_vuex_actions():
         return {"success": False, "error": str(e)}
 
 
+@router.get("/api/debug/full-register-test", summary="글로벌 등록 전체 시뮬레이션 + API 캡처")
+async def debug_full_register_test():
+    """Playwright로 UI 조작하여 실제 저장하고, 모든 네트워크 요청을 캡처합니다."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    page = _artist_session.page
+    captured = []
+    steps = []
+
+    try:
+        # 네트워크 요청 캡처 시작
+        async def on_req(request):
+            if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+                url = request.url
+                if "kinesis" not in url:  # AWS 로깅 제외
+                    try:
+                        captured.append({
+                            "url": url,
+                            "method": request.method,
+                            "body": (request.post_data or "")[:3000],
+                        })
+                    except Exception:
+                        captured.append({"url": url, "method": request.method})
+
+        async def on_resp(response):
+            url = response.url
+            if response.request.method in ("POST", "PUT", "PATCH") and "kinesis" not in url:
+                try:
+                    status = response.status
+                    for c in captured:
+                        if c["url"] == url and "status" not in c:
+                            c["status"] = status
+                            try:
+                                body = await response.text()
+                                c["response"] = body[:1000]
+                            except Exception:
+                                pass
+                            break
+                except Exception:
+                    pass
+
+        page.on("request", on_req)
+        page.on("response", on_resp)
+
+        try:
+            # STEP 1: 글로벌 페이지로 이동
+            import re
+            m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+            pid = m.group(1) if m else ""
+            if not pid:
+                return {"error": "product_id 없음"}
+
+            if "/global" not in page.url:
+                await page.goto(f"https://artist.idus.com/product/{pid}/global", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(5)
+            steps.append({"step": "글로벌 이동", "url": page.url})
+
+            # STEP 2: 작품명 입력
+            textarea = page.locator('textarea[name="globalProductName"]').first
+            if await textarea.count() > 0:
+                await textarea.fill("テスト作品名")
+                steps.append({"step": "작품명 입력", "ok": True})
+            else:
+                steps.append({"step": "작품명 입력", "ok": False, "error": "textarea 없음"})
+
+            # STEP 3: 이미지 '+' 클릭 시도 — 페이지의 모든 요소에서 '+' 찾기
+            plus_result = await page.evaluate("""
+                () => {
+                    // 방법 1: 텍스트가 '+' 인 요소
+                    const allEls = document.querySelectorAll('*');
+                    for (const el of allEls) {
+                        if (el.children.length > 3) continue;
+                        const text = el.textContent?.trim();
+                        if (text === '+' && el.offsetHeight > 20 && el.offsetWidth > 20) {
+                            el.click();
+                            return { clicked: true, method: 'text+', tag: el.tagName, classes: (el.className||'').substring(0,80) };
+                        }
+                    }
+                    // 방법 2: SVG나 icon 클래스
+                    const addBtns = document.querySelectorAll('[class*="add"], [class*="Add"], [class*="plus"], [class*="Plus"]');
+                    for (const el of addBtns) {
+                        if (el.offsetHeight > 20 && el.closest('[class*="image"], [class*="Image"]')) {
+                            el.click();
+                            return { clicked: true, method: 'class', tag: el.tagName, classes: (el.className||'').substring(0,80) };
+                        }
+                    }
+                    // 방법 3: 이미지 업로드 영역 자체 (빈 사각형)
+                    const uploadAreas = document.querySelectorAll('[class*="upload"], [class*="Upload"], [class*="dropzone"]');
+                    for (const el of uploadAreas) {
+                        if (el.offsetHeight > 40) {
+                            el.click();
+                            return { clicked: true, method: 'upload-area', tag: el.tagName, classes: (el.className||'').substring(0,80) };
+                        }
+                    }
+                    return { clicked: false };
+                }
+            """)
+            steps.append({"step": "이미지 + 클릭", "result": plus_result})
+
+            if plus_result.get("clicked"):
+                await asyncio.sleep(1.5)
+
+                # "국내 작품 이미지 불러오기" 클릭
+                import_btn = page.locator('text="국내 작품 이미지 불러오기"').first
+                if await import_btn.count() > 0:
+                    await import_btn.click()
+                    await asyncio.sleep(2)
+                    steps.append({"step": "국내 이미지 불러오기 클릭", "ok": True})
+
+                    # "전체" 체크박스
+                    select_all = page.locator('.v-dialog--active label:has-text("전체")').first
+                    if await select_all.count() > 0:
+                        await select_all.click()
+                        await asyncio.sleep(1)
+                        steps.append({"step": "전체 선택", "ok": True})
+
+                        # "이미지 추가" 버튼
+                        add_btn = page.locator('.v-dialog--active button:has-text("이미지 추가")').first
+                        if await add_btn.count() > 0:
+                            await add_btn.click()
+                            await asyncio.sleep(2)
+                            steps.append({"step": "이미지 추가", "ok": True})
+                        else:
+                            steps.append({"step": "이미지 추가", "ok": False, "error": "버튼 없음"})
+                    else:
+                        steps.append({"step": "전체 선택", "ok": False})
+                        await page.keyboard.press("Escape")
+                else:
+                    steps.append({"step": "국내 이미지 불러오기 클릭", "ok": False})
+                    await page.keyboard.press("Escape")
+
+            # STEP 4: 설명 — "작품 설명 작성하기" 클릭 후 에디터에서 입력
+            desc_btn = page.locator('button:has-text("작품 설명 작성하기")').first
+            if await desc_btn.count() > 0:
+                await desc_btn.click()
+                await asyncio.sleep(2)
+                steps.append({"step": "설명 에디터 열기", "ok": True})
+
+                # 에디터 모달에서 "본문" 버튼 클릭 후 텍스트 입력
+                # (에디터 DOM을 덤프하여 구조 확인)
+                editor_dump = await page.evaluate("""
+                    () => {
+                        const dialog = document.querySelector('.v-dialog--active');
+                        if (!dialog) return { found: false };
+                        // 모든 버튼
+                        const btns = Array.from(dialog.querySelectorAll('button')).map(b => ({
+                            text: b.textContent?.trim().substring(0, 40),
+                            classes: (b.className||'').substring(0, 80),
+                            visible: b.offsetHeight > 0,
+                        })).filter(b => b.visible);
+                        // 모든 input/textarea/contenteditable
+                        const inputs = Array.from(dialog.querySelectorAll('input, textarea, [contenteditable="true"]')).map(i => ({
+                            tag: i.tagName,
+                            type: i.type,
+                            placeholder: i.placeholder?.substring(0, 40),
+                            classes: (i.className||'').substring(0, 80),
+                        }));
+                        return { found: true, buttons: btns, inputs: inputs, text: dialog.innerText?.substring(0, 500) };
+                    }
+                """)
+                steps.append({"step": "에디터 DOM 덤프", "data": editor_dump})
+
+                # 에디터 닫기
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
+            else:
+                steps.append({"step": "설명 에디터 열기", "ok": False, "error": "버튼 없음"})
+
+            # STEP 5: "임시저장" 클릭
+            save_btn = page.locator('button:has-text("임시저장")').first
+            if await save_btn.count() > 0:
+                await save_btn.click()
+                await asyncio.sleep(3)
+                steps.append({"step": "임시저장 클릭", "ok": True})
+            else:
+                steps.append({"step": "임시저장 클릭", "ok": False})
+
+            # 스낵바 확인
+            snack = page.locator('.v-snack__content').first
+            try:
+                if await asyncio.wait_for(snack.count(), timeout=2) > 0:
+                    msg = await snack.inner_text()
+                    steps.append({"step": "스낵바", "message": msg})
+            except asyncio.TimeoutError:
+                pass
+
+        finally:
+            page.remove_listener("request", on_req)
+            page.remove_listener("response", on_resp)
+
+        return {
+            "success": True,
+            "steps": steps,
+            "captured_requests": captured,
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e), "steps": steps, "captured_requests": captured}
+
+
 @router.get("/api/debug/intercept-save", summary="임시저장 API 인터셉트")
 async def debug_intercept_save():
     """글로벌 페이지에서 임시저장 클릭 시 호출되는 API를 캡처합니다."""
