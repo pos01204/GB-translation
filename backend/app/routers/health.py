@@ -451,3 +451,78 @@ async def debug_deep_extract(product_id: str = ""):
     except Exception as e:
         logger.error(f"Deep extract 실패: {e}")
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/vuex-product", summary="Vuex 스토어 제품 데이터")
+async def debug_vuex_product(product_id: str = ""):
+    """Vuex 스토어에서 제품 이미지, 옵션, 설명 데이터를 추출합니다."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+    if not product_id:
+        return {"error": "product_id 필요"}
+
+    try:
+        page = _artist_session.page
+        if product_id not in page.url:
+            await page.goto(f"https://artist.idus.com/product/{product_id}", timeout=30000)
+            await page.wait_for_load_state("domcontentloaded")
+            await asyncio.sleep(3)
+
+        result = await page.evaluate("""
+            () => {
+                const output = {};
+                const app = document.querySelector('#app');
+                if (!app || !app.__vue__ || !app.__vue__.$store) {
+                    return { error: 'Vuex store not found' };
+                }
+                const store = app.__vue__.$store;
+                const state = store.state;
+
+                // productForm._item (이미지, 옵션, 설명 등 폼 데이터)
+                if (state.productForm && state.productForm._item) {
+                    const item = state.productForm._item;
+                    output.formItemKeys = Object.keys(item);
+                    // 이미지 관련 필드
+                    for (const key of Object.keys(item)) {
+                        const lk = key.toLowerCase();
+                        if (lk.includes('image') || lk.includes('photo') || lk.includes('img')) {
+                            try { output['form_' + key] = JSON.stringify(item[key]); }
+                            catch(e) { output['form_' + key] = String(item[key]).substring(0, 500); }
+                        }
+                        if (lk.includes('option')) {
+                            try { output['form_' + key] = JSON.stringify(item[key]); }
+                            catch(e) { output['form_' + key] = String(item[key]).substring(0, 500); }
+                        }
+                        if (lk.includes('premium') || lk.includes('description') || lk.includes('desc')) {
+                            try { output['form_' + key] = JSON.stringify(item[key]); }
+                            catch(e) { output['form_' + key] = String(item[key]).substring(0, 500); }
+                        }
+                    }
+                }
+
+                // product 스토어
+                if (state.product) {
+                    output.productStoreKeys = Object.keys(state.product);
+                }
+
+                // globalProduct 스토어
+                if (state.globalProduct) {
+                    output.globalProductKeys = Object.keys(state.globalProduct);
+                    if (state.globalProduct._detail) {
+                        output.globalDetailKeys = Object.keys(state.globalProduct._detail);
+                    }
+                }
+
+                return output;
+            }
+        """)
+
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        logger.error(f"Vuex 디버그 실패: {e}")
+        return {"success": False, "error": str(e)}
