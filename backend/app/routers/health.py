@@ -510,6 +510,103 @@ async def debug_vuex_product():
         return {"success": False, "error": str(e)}
 
 
+@router.get("/api/debug/global-editor", summary="글로벌 탭 에디터 구조 확인")
+async def debug_global_editor(product_id: str = ""):
+    """글로벌 탭의 Vuex 상태 + 에디터 DOM 구조를 확인합니다."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    try:
+        page = _artist_session.page
+
+        # 1. 글로벌 탭으로 전환
+        global_tab = page.locator('button:has-text("글로벌"), [role="tab"]:has-text("글로벌")').first
+        if await global_tab.count() > 0:
+            await global_tab.click()
+            await asyncio.sleep(2)
+
+        # 2. Vuex에서 globalProduct 상태 덤프
+        vuex_data = await page.evaluate("""
+            () => {
+                const app = document.querySelector('#app');
+                if (!app || !app.__vue__ || !app.__vue__.$store) return { error: 'no store' };
+                const store = app.__vue__.$store;
+                const gp = store.state.globalProduct || {};
+                const detail = gp._detail || {};
+
+                return {
+                    detailKeys: Object.keys(detail),
+                    hasPremiumDescription: 'premiumDescription' in detail,
+                    hasLanguageContents: 'languageContents' in detail,
+                    languageContents: detail.languageContents
+                        ? JSON.stringify(detail.languageContents).substring(0, 2000)
+                        : null,
+                    premiumDescription: detail.premiumDescription
+                        ? JSON.stringify(detail.premiumDescription).substring(0, 2000)
+                        : null,
+                    // 각 언어별 내용 확인
+                    detailUI: gp._detailUI
+                        ? JSON.stringify(gp._detailUI).substring(0, 1000)
+                        : null,
+                    detailUIKeys: gp._detailUI ? Object.keys(gp._detailUI) : null,
+                };
+            }
+        """)
+
+        # 3. "수정하기" 버튼 클릭 가능 여부
+        edit_btn = page.locator('button:has-text("수정하기")').first
+        has_edit_btn = await edit_btn.count() > 0
+
+        # 4. 에디터 영역 확인
+        editor_info = await page.evaluate("""
+            () => {
+                const editors = [];
+                // contenteditable
+                for (const el of document.querySelectorAll('[contenteditable="true"]')) {
+                    editors.push({
+                        type: 'contenteditable',
+                        tag: el.tagName,
+                        classes: (el.className || '').substring(0, 100),
+                        htmlLength: el.innerHTML?.length || 0,
+                        textPreview: el.textContent?.substring(0, 100),
+                    });
+                }
+                // Quill/ProseMirror/TipTap
+                for (const sel of ['.ql-editor', '.ProseMirror', '.tiptap']) {
+                    for (const el of document.querySelectorAll(sel)) {
+                        editors.push({
+                            type: sel,
+                            tag: el.tagName,
+                            htmlLength: el.innerHTML?.length || 0,
+                        });
+                    }
+                }
+                return editors;
+            }
+        """)
+
+        # 5. 국내 탭으로 복원
+        domestic_tab = page.locator('button:has-text("국내"), [role="tab"]:has-text("국내")').first
+        if await domestic_tab.count() > 0:
+            await domestic_tab.click()
+            await asyncio.sleep(1)
+
+        return {
+            "success": True,
+            "vuex": vuex_data,
+            "hasEditButton": has_edit_btn,
+            "editors": editor_info,
+        }
+
+    except Exception as e:
+        logger.error(f"글로벌 에디터 디버그 실패: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @router.get("/api/debug/option-modal", summary="옵션 모달 DOM 디버그")
 async def debug_option_modal():
     """옵션 항목 클릭 → 모달 열기 → 모달 내 input 구조 확인"""

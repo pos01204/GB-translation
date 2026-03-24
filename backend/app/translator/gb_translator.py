@@ -307,8 +307,43 @@ class GBProductTranslator:
 
         result = await self._call_gemini(prompt, max_tokens=8000)
         if result:
+            # HTML 태그가 없으면 후처리로 추가
+            result = self._ensure_html_tags(result)
             return result
         return f"<p>{domestic.title}</p>"
+
+    @staticmethod
+    def _ensure_html_tags(text: str) -> str:
+        """Gemini 응답에 HTML 태그가 없으면 자동 추가"""
+        import re
+        # 이미 HTML 태그가 있으면 그대로 반환
+        if '<h3>' in text or '<p>' in text or '<h2>' in text:
+            return text
+
+        # 줄바꿈으로 분리하여 HTML 구조화
+        lines = text.strip().split('\n')
+        html_parts = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # 제목처럼 보이는 줄 (짧고 특수문자 없음)
+            if (len(line) < 60
+                    and not line.endswith('.')
+                    and not line.endswith(':')
+                    and re.match(r'^[A-Za-z\s&\u3000-\u9fff\uac00-\ud7ff]+$', line)):
+                html_parts.append(f'<h3>{line}</h3>')
+            # 볼드 키워드: "**text**:" 또는 "Text:" 패턴
+            elif re.match(r'^\*\*(.+?)\*\*[:\s]', line):
+                clean = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', line)
+                html_parts.append(f'<p>{clean}</p>')
+            elif re.match(r'^[A-Z][a-z]+.*:', line) and len(line) < 200:
+                parts = line.split(':', 1)
+                html_parts.append(f'<p><strong>{parts[0]}:</strong>{parts[1]}</p>')
+            else:
+                html_parts.append(f'<p>{line}</p>')
+
+        return '\n'.join(html_parts) if html_parts else f'<p>{text[:500]}</p>'
 
     async def _translate_description(self, html: str, language: str) -> str:
         """작품 설명 HTML 번역 — HTML 태그 보존"""
