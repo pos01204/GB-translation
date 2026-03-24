@@ -18,13 +18,31 @@ router = APIRouter(prefix="/api/v2/translate", tags=["V2 - Translation"])
 # 전역 참조 (main.py에서 주입)
 _artist_session = None
 _gb_translator = None
+_initialize_services = None  # 지연 초기화 함수
 
 
-def configure(artist_session, gb_translator):
+def configure(artist_session, gb_translator, initialize_fn=None):
     """main.py에서 의존성 주입"""
-    global _artist_session, _gb_translator
+    global _artist_session, _gb_translator, _initialize_services
     _artist_session = artist_session
-    _gb_translator = gb_translator
+    if gb_translator is not None:
+        _gb_translator = gb_translator
+    if initialize_fn is not None:
+        _initialize_services = initialize_fn
+
+
+async def _ensure_translator():
+    """번역기가 초기화되지 않았으면 초기화 실행"""
+    global _gb_translator
+    if _gb_translator is not None:
+        return True
+    if _initialize_services:
+        logger.info("번역기 미초기화 — v1 서비스 초기화 실행...")
+        await _initialize_services()
+        # 초기화 후 gb_translator가 main.py에서 업데이트되었을 수 있음
+        # configure가 다시 호출되므로 _gb_translator가 설정됨
+        return _gb_translator is not None
+    return False
 
 
 # ──────────────── Request/Response Models ────────────────
@@ -67,10 +85,13 @@ async def translate_preview(request: TranslatePreviewRequest):
     """
     if not _artist_session:
         raise HTTPException(status_code=503, detail="세션이 초기화되지 않았습니다")
-    if not _gb_translator:
-        raise HTTPException(status_code=503, detail="번역기가 초기화되지 않았습니다")
     if not await _artist_session.is_authenticated():
         raise HTTPException(status_code=401, detail="로그인이 필요합니다")
+
+    # 번역기 지연 초기화
+    translator_ready = await _ensure_translator()
+    if not translator_ready:
+        raise HTTPException(status_code=503, detail="번역기 초기화에 실패했습니다. Gemini API 키를 확인해주세요.")
 
     try:
         # 1. 작품 페이지로 이동
@@ -130,10 +151,8 @@ async def translate_direct(request: TranslateDirectRequest):
     프론트엔드에서 이미 추출한 국내 데이터를 수정 후
     재번역할 때 유용합니다.
     """
-    if not _gb_translator:
-        raise HTTPException(status_code=503, detail="번역기가 초기화되지 않았습니다")
-
-    if not _gb_translator.is_initialized:
+    translator_ready = await _ensure_translator()
+    if not translator_ready:
         raise HTTPException(status_code=503, detail="Gemini API가 초기화되지 않았습니다")
 
     try:

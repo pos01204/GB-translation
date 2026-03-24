@@ -420,53 +420,117 @@ class ArtistWebSession:
         self, items: list, status: str
     ) -> list[ProductSummary]:
         """API 응답의 작품 배열을 ProductSummary 리스트로 변환"""
+        if not items:
+            return []
+
+        # 첫 아이템의 전체 구조를 로깅 (필드명 파악용)
+        first_item = items[0] if items else {}
+        if isinstance(first_item, dict):
+            logger.info(f"[API 파싱] 첫 아이템 키: {list(first_item.keys())}")
+            # 각 키의 값 타입과 샘플 출력
+            for k, v in first_item.items():
+                sample = str(v)[:100] if v is not None else "None"
+                logger.info(f"  {k}: ({type(v).__name__}) {sample}")
+
         result = []
         for item in items:
             if not isinstance(item, dict):
                 continue
 
-            # UUID 형식의 ID 필드 탐색
+            # UUID 형식의 ID 필드 탐색 (모든 문자열 필드에서)
             product_id = None
+            uuid_pattern = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
+
+            # 명시적 키 우선
             for key in ("product_id", "productId", "uuid", "id"):
                 val = item.get(key)
-                if val and isinstance(val, str) and len(val) >= 32:
+                if val and isinstance(val, str) and (len(val) >= 32 or uuid_pattern.match(val)):
                     product_id = val
                     break
+
+            # 못 찾으면 모든 문자열 필드에서 UUID 탐색
+            if not product_id:
+                for key, val in item.items():
+                    if isinstance(val, str) and uuid_pattern.match(val):
+                        product_id = val
+                        break
 
             if not product_id:
                 continue
 
-            title = (
-                item.get("title")
-                or item.get("name")
-                or item.get("productName")
-                or item.get("product_name", "")
-            )
-            price = item.get("price") or item.get("salePrice") or item.get("sale_price") or 0
-            if isinstance(price, str):
-                price = self._parse_price(price)
+            # 제목: 다양한 키 + 최장 문자열 필드 폴백
+            title = None
+            for key in ("title", "name", "productName", "product_name",
+                        "productTitle", "product_title", "displayName", "display_name"):
+                val = item.get(key)
+                if val and isinstance(val, str) and len(val) > 1:
+                    title = val
+                    break
 
-            thumbnail = (
-                item.get("thumbnail_url")
-                or item.get("thumbnailUrl")
-                or item.get("image")
-                or item.get("imageUrl")
-                or item.get("representative_image")
-                or item.get("thumbnail")
-                or item.get("img")
-            )
+            # 제목을 못 찾으면, 10자 이상의 문자열 필드 중 가장 긴 것
+            if not title:
+                best = ""
+                for key, val in item.items():
+                    if isinstance(val, str) and len(val) > len(best) and len(val) >= 5:
+                        # UUID나 URL이 아닌 것만
+                        if not uuid_pattern.match(val) and not val.startswith("http"):
+                            best = val
+                if best:
+                    title = best
 
-            has_global = bool(
-                item.get("global_status")
-                or item.get("globalStatus")
-                or item.get("hasGlobal")
-                or item.get("is_global")
-            )
+            # 가격: 다양한 키
+            price = 0
+            for key in ("price", "salePrice", "sale_price", "sellingPrice",
+                        "selling_price", "originalPrice", "original_price",
+                        "discountPrice", "discount_price"):
+                val = item.get(key)
+                if val:
+                    if isinstance(val, (int, float)):
+                        price = int(val)
+                        break
+                    elif isinstance(val, str):
+                        price = self._parse_price(val)
+                        if price > 0:
+                            break
+
+            # 썸네일: 다양한 키 + URL 패턴 탐색
+            thumbnail = None
+            for key in ("thumbnail_url", "thumbnailUrl", "image", "imageUrl",
+                        "representative_image", "thumbnail", "img", "photo",
+                        "photoUrl", "photo_url", "mainImage", "main_image",
+                        "representativeImageUrl", "representative_image_url"):
+                val = item.get(key)
+                if val and isinstance(val, str) and ("http" in val or val.startswith("/")):
+                    thumbnail = val
+                    break
+
+            # URL 필드 탐색 폴백
+            if not thumbnail:
+                for key, val in item.items():
+                    if isinstance(val, str) and ("image" in key.lower() or "img" in key.lower() or "photo" in key.lower() or "thumb" in key.lower()):
+                        if "http" in val or val.startswith("/"):
+                            thumbnail = val
+                            break
+
+            # 글로벌 상태
+            has_global = False
+            for key in ("global_status", "globalStatus", "hasGlobal", "is_global",
+                        "globalSaleStatus", "global_sale_status"):
+                val = item.get(key)
+                if val:
+                    if isinstance(val, bool):
+                        has_global = val
+                    elif isinstance(val, str):
+                        has_global = val.lower() not in ("", "none", "null", "false", "not_registered")
+                    elif isinstance(val, (int, float)):
+                        has_global = val > 0
+                    if has_global:
+                        break
 
             result.append(ProductSummary(
                 product_id=str(product_id),
                 title=str(title) if title else "",
-                price=int(price) if price else 0,
+                price=price,
                 thumbnail_url=str(thumbnail) if thumbnail else None,
                 status=ProductStatus(status),
                 global_status=(

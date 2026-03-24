@@ -115,7 +115,7 @@ async def lifespan(app: FastAPI):
     health.configure(artist_session)
     session.configure(artist_session)
     products.configure(artist_session)
-    translation.configure(artist_session, gb_translator)
+    translation.configure(artist_session, gb_translator, initialize_v1_services)
     registration.configure(artist_session, gb_translator)
 
     yield
