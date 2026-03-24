@@ -998,9 +998,20 @@ async def debug_intercept_save():
     captured_requests = []
 
     try:
-        # 글로벌 페이지 확인
+        # 글로벌 페이지로 이동
         if "/global" not in page.url:
-            return {"error": f"글로벌 페이지가 아닙니다: {page.url}"}
+            import re
+            m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+            if m:
+                gurl = f"https://artist.idus.com/product/{m.group(1)}/global"
+                try:
+                    await page.goto(gurl, timeout=30000)
+                    await page.wait_for_load_state("domcontentloaded")
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+            else:
+                return {"error": f"product_id를 찾을 수 없습니다: {page.url}"}
 
         # 모든 POST/PUT/PATCH 요청 캡처
         async def on_request(request):
