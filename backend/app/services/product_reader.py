@@ -336,81 +336,40 @@ class ProductReader:
                     continue
 
                 try:
-                    # 옵션 항목 클릭하여 모달 열기
-                    option_el = self.page.locator(f'text="{option_name}"').first
+                    # 옵션 항목 클릭하여 모달 열기 — 버튼 우선 탐색
+                    option_el = self.page.locator(
+                        f'button:has-text("{option_name}")'
+                    ).first
                     if await option_el.count() == 0:
-                        # 부분 매칭 시도
-                        option_el = self.page.locator(f':text("{option_name}")').first
+                        option_el = self.page.locator(f'text="{option_name}"').first
                     if await option_el.count() > 0:
                         await option_el.click()
-                        await asyncio.sleep(1)  # 모달 렌더링 대기
+                        await asyncio.sleep(1.5)  # 모달 렌더링 대기
 
-                        # 모달에서 옵션 데이터 읽기
+                        # 모달에서 옵션 데이터 읽기 (name 속성 기반)
                         modal_data = await self.page.evaluate("""
                             () => {
-                                // 모달/다이얼로그 찾기
-                                const modal = document.querySelector(
-                                    '.v-dialog--active, [class*="dialog"][class*="active"], [role="dialog"]'
-                                );
+                                // 활성 모달 찾기
+                                const modal = document.querySelector('.v-dialog--active');
                                 if (!modal) return null;
 
-                                // 옵션명 input
-                                const nameInputs = modal.querySelectorAll('input[type="text"]');
-                                let optionName = '';
-                                for (const inp of nameInputs) {
-                                    const label = inp.closest('.v-input')?.querySelector('label, .v-label');
-                                    if (label && label.textContent.includes('옵션명')) {
-                                        optionName = inp.value;
-                                        break;
-                                    }
-                                    // 첫 번째 input이 옵션명일 가능성
-                                    if (!optionName && inp.value && inp.value.length < 20) {
-                                        optionName = inp.value;
-                                    }
-                                }
+                                // name="productOptionName" → 옵션명
+                                const nameInput = modal.querySelector('input[name="productOptionName"]');
+                                const optionName = nameInput ? nameInput.value.trim() : '';
 
-                                // 옵션 값들: "옵션 값" 라벨 근처의 input들
+                                // name="productOptionValue" → 옵션값 (여러 개)
+                                // name="optionPrice" → 추가금액 (옵션값과 1:1 매칭)
+                                const valueInputs = Array.from(modal.querySelectorAll('input[name="productOptionValue"]'));
+                                const priceInputs = Array.from(modal.querySelectorAll('input[name="optionPrice"]'));
+
                                 const values = [];
-                                const allInputs = Array.from(modal.querySelectorAll('input[type="text"]'));
-                                let inValues = false;
-                                for (let i = 0; i < allInputs.length; i++) {
-                                    const inp = allInputs[i];
-                                    const container = inp.closest('.v-input, [class*="field"]');
-                                    const label = container?.querySelector('label, .v-label');
-                                    const labelText = label?.textContent?.trim() || '';
-
-                                    if (labelText.includes('옵션 값') || labelText.includes('옵션값')) {
-                                        // 이 input은 옵션 값
-                                        if (inp.value) {
-                                            // 다음 input이 추가금액인지 확인
-                                            let addPrice = 0;
-                                            const nextInp = allInputs[i + 1];
-                                            if (nextInp) {
-                                                const nextLabel = nextInp.closest('.v-input, [class*="field"]')?.querySelector('label, .v-label');
-                                                if (nextLabel && nextLabel.textContent.includes('추가금액')) {
-                                                    addPrice = parseInt(nextInp.value.replace(/[^\\d]/g, ''), 10) || 0;
-                                                }
-                                            }
-                                            values.push({
-                                                value: inp.value.trim(),
-                                                additional_price: addPrice,
-                                            });
-                                        }
-                                    }
-                                }
-
-                                // 값을 못 찾았으면, 옵션명 이후의 모든 텍스트 input 시도
-                                if (values.length === 0) {
-                                    let foundName = false;
-                                    for (const inp of allInputs) {
-                                        if (inp.value === optionName) {
-                                            foundName = true;
-                                            continue;
-                                        }
-                                        if (foundName && inp.value && !inp.value.match(/^\\d+$/)) {
-                                            values.push({ value: inp.value.trim(), additional_price: 0 });
-                                        }
-                                    }
+                                for (let i = 0; i < valueInputs.length; i++) {
+                                    const val = valueInputs[i].value.trim();
+                                    if (!val) continue;
+                                    const price = priceInputs[i]
+                                        ? parseInt(priceInputs[i].value.replace(/[^0-9]/g, ''), 10) || 0
+                                        : 0;
+                                    values.push({ value: val, additional_price: price });
                                 }
 
                                 return { name: optionName, values: values };
