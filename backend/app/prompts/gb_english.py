@@ -56,3 +56,30 @@ Korean option values:
 {text}
 
 English option values:"""
+
+
+GB_DESCRIPTION_REBUILD_PROMPT_EN = """You are creating an English product description for a handmade item
+on the global idus marketplace. Create a NEW description from the Korean source data below.
+
+IMPORTANT RULES:
+1. Output ONLY HTML. Use <h3> for section headings, <p> for paragraphs
+2. Do NOT include any <img> tags — text only, no images
+3. Do NOT include Korean text, Korean won prices, or Korea-specific info
+4. Structure the description with clear sections for international buyers
+5. Tone: warm, artisan-focused (like Etsy listings). Use "artist" not "seller"
+6. Include relevant keywords naturally for SEO
+7. End with: <p>For production time and details, please contact us via the idus app messaging.</p>
+
+SUGGESTED STRUCTURE:
+- <h3>About This Creation</h3> — what makes it special
+- <h3>Features</h3> — key selling points
+- <h3>Materials & Details</h3> — materials, dimensions, care info
+- <h3>Perfect For</h3> — gift ideas, occasions
+
+SOURCE DATA (Korean — use as reference, do NOT translate literally):
+{text}
+
+English HTML description (text only, no images):"""
+
+
+GB_DESCRIPTION_REBUILD_PROMPT_JA = None  # Defined in gb_japanese.py

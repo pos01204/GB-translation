@@ -24,8 +24,10 @@ from ..config import settings
 from ..prompts import (
     GB_TITLE_PROMPT_EN, GB_DESCRIPTION_PROMPT_EN,
     GB_KEYWORD_PROMPT_EN, GB_OPTION_PROMPT_EN,
+    GB_DESCRIPTION_REBUILD_PROMPT_EN,
     GB_TITLE_PROMPT_JA, GB_DESCRIPTION_PROMPT_JA,
     GB_KEYWORD_PROMPT_JA, GB_OPTION_PROMPT_JA,
+    GB_DESCRIPTION_REBUILD_PROMPT_JA,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,40 +85,49 @@ class GBProductTranslator:
         do_en = "en" in target_languages
         do_ja = "ja" in target_languages
 
-        # ── 최적화: EN/JA 교차 번역 (순차 대비 ~40% 단축) ──
-        # 기존: EN 제목→EN 설명→EN 키워드 → JA 제목→JA 설명→JA 키워드 (8회 호출)
-        # 최적화: 제목+키워드를 1개 프롬프트로 합치고, EN/JA 교차 실행 (5-6회 호출)
+        # ── GB 최적화 파이프라인 ──
+        # 1. OCR (1회) → 텍스트 수집
+        # 2. 제목+키워드 (EN/JA 각 1회)
+        # 3. AI 상세 설명 재구성 (EN/JA 각 1회) — KR 데이터 + OCR 텍스트 기반
+        # 4. 옵션 번역
 
         en_title, en_desc, en_keywords = "", "", []
         ja_title, ja_desc, ja_keywords = "", "", []
 
-        # 1. 제목+키워드 합쳐서 번역 (EN → JA 교차, 각 1회 호출로 2항목 처리)
+        # 1. 이미지 OCR — 텍스트 수집 (1회, 이미지 생성 없음)
+        ocr_texts: list[str] = []
+        if domestic.detail_images:
+            ocr_results = await self._ocr_all_images(domestic.detail_images)
+            ocr_texts = [r["original_text"] for r in ocr_results]
+            logger.info(f"이미지 OCR 완료: {len(ocr_texts)}개 텍스트 수집")
+
+        # 2. 제목+키워드
         if do_en:
             en_title, en_keywords = await self._translate_title_and_keywords(
                 domestic.title, domestic.keywords, "en",
             )
-            logger.info(f"EN 제목+키워드 완료")
+            logger.info("EN 제목+키워드 완료")
 
         if do_ja:
             ja_title, ja_keywords = await self._translate_title_and_keywords(
                 domestic.title, domestic.keywords, "ja",
             )
-            logger.info(f"JA 제목+키워드 완료")
+            logger.info("JA 제목+키워드 완료")
 
-        # 2. 설명 번역 (가장 오래 걸림 — EN → JA 교차)
+        # 3. AI 상세 설명 재구성 (KR 텍스트 + OCR 텍스트 → 새 GB 설명)
         if do_en:
-            en_desc = await self._translate_description(
-                domestic.description_html, "en",
+            en_desc = await self._build_gb_description(
+                domestic, ocr_texts, "en",
             )
-            logger.info("EN 설명 완료")
+            logger.info("EN 설명 재구성 완료")
 
         if do_ja:
-            ja_desc = await self._translate_description(
-                domestic.description_html, "ja",
+            ja_desc = await self._build_gb_description(
+                domestic, ocr_texts, "ja",
             )
-            logger.info("JA 설명 완료")
+            logger.info("JA 설명 재구성 완료")
 
-        # 3. LanguageData 조립
+        # 4. LanguageData 조립
         if do_en:
             en_data = LanguageData(
                 title=en_title[:settings.title_max_length_global],
@@ -132,29 +143,12 @@ class GBProductTranslator:
                 use_domestic_images=True,
             )
 
-        # 4. 옵션 번역 (EN/JA 동시)
+        # 5. 옵션 번역
         if domestic.options:
             global_options = await self._translate_options(
                 domestic.options, target_languages,
             )
             logger.info(f"옵션 번역 완료: {len(global_options)}개")
-
-        # 5. 이미지 OCR (1회만) + 언어별 번역 + 이미지 생성
-        if domestic.detail_images:
-            ocr_results = await self._ocr_all_images(domestic.detail_images)
-            logger.info(f"이미지 OCR 완료: {len(ocr_results)}개 텍스트 발견")
-
-            for lang in target_languages:
-                image_texts = await self._translate_and_generate_images(
-                    ocr_results, lang,
-                )
-                if lang == "en" and en_data:
-                    en_data.image_texts = image_texts
-                elif lang == "ja" and ja_data:
-                    ja_data.image_texts = image_texts
-                logger.info(
-                    f"이미지 번역+생성 완료 ({lang}): {len(image_texts)}개"
-                )
 
         result = GlobalProductData(
             source_product_id=domestic.product_id,
@@ -268,6 +262,53 @@ class GBProductTranslator:
             result = result.strip().strip('"').strip("'")
             return result
         return title
+
+    async def _build_gb_description(
+        self,
+        domestic: DomesticProduct,
+        ocr_texts: list[str],
+        language: str,
+    ) -> str:
+        """KR 데이터 전체를 기반으로 GB 최적화 상세 설명을 AI로 재구성
+
+        이미지는 포함하지 않음 (텍스트 중심, SEO 최적화)
+        """
+        # 모든 KR 텍스트를 수집
+        parts = []
+        parts.append(f"제목: {domestic.title}")
+        parts.append(f"카테고리: {domestic.category_path}")
+        if domestic.keywords:
+            parts.append(f"키워드: {', '.join(domestic.keywords)}")
+        if domestic.intro:
+            parts.append(f"한줄소개: {domestic.intro}")
+        if domestic.features:
+            parts.append(f"특장점: {' / '.join(domestic.features)}")
+        if domestic.description_html:
+            # HTML 태그 제거하여 순수 텍스트만
+            import re
+            clean_text = re.sub(r'<[^>]+>', ' ', domestic.description_html)
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            if clean_text:
+                parts.append(f"설명: {clean_text[:500]}")
+        if domestic.options:
+            for opt in domestic.options:
+                vals = [v.value for v in opt.values]
+                parts.append(f"옵션 [{opt.name}]: {', '.join(vals)}")
+        for i, text in enumerate(ocr_texts[:10]):
+            parts.append(f"이미지텍스트{i+1}: {text[:200]}")
+
+        combined = "\n".join(parts)
+
+        prompt_template = (
+            GB_DESCRIPTION_REBUILD_PROMPT_EN if language == "en"
+            else GB_DESCRIPTION_REBUILD_PROMPT_JA
+        )
+        prompt = prompt_template.format(text=combined)
+
+        result = await self._call_gemini(prompt, max_tokens=8000)
+        if result:
+            return result
+        return f"<p>{domestic.title}</p>"
 
     async def _translate_description(self, html: str, language: str) -> str:
         """작품 설명 HTML 번역 — HTML 태그 보존"""
@@ -505,101 +546,7 @@ class GBProductTranslator:
         logger.info(f"OCR 완료: {len(results)}/{len(target_images)}개 텍스트 발견")
         return results
 
-    async def _translate_and_generate_images(
-        self,
-        ocr_results: list[dict],
-        language: str,
-    ) -> list[ImageText]:
-        """OCR 텍스트 번역 + 번역된 이미지 생성 (gemini-2.0-flash)"""
-        import base64
-
-        results: list[ImageText] = []
-        image_gen_failed = False  # 첫 실패 후 이후 생성 스킵
-
-        for item in ocr_results:
-            try:
-                # 텍스트 번역
-                translated = await self._translate_single_text(
-                    item["original_text"], language,
-                )
-
-                # 번역 이미지 생성 (이전에 실패하지 않았을 때만)
-                translated_img_b64 = None
-                if not image_gen_failed:
-                    try:
-                        translated_img_b64 = await self._generate_translated_image(
-                            image_data=item["image_data"],
-                            mime=item["mime"],
-                            ocr_text=item["original_text"],
-                            translated_text=translated,
-                            language=language,
-                        )
-                    except Exception as e:
-                        error_str = str(e)
-                        if "404" in error_str or "NOT_FOUND" in error_str:
-                            logger.warning(f"이미지 생성 모델 미지원 — 이후 생성 스킵: {e}")
-                            image_gen_failed = True
-                        else:
-                            logger.warning(f"이미지 생성 실패 (텍스트만): {e}")
-
-                results.append(ImageText(
-                    image_url=item["image_url"],
-                    original_text=item["original_text"],
-                    translated_text=translated,
-                    order_index=item["order_index"],
-                    translated_image_base64=translated_img_b64,
-                ))
-
-            except Exception as e:
-                logger.warning(f"이미지 번역 실패: {e}")
-
-        results.sort(key=lambda x: x.order_index)
-        return results
-
-    async def _generate_translated_image(
-        self,
-        image_data: bytes,
-        mime: str,
-        ocr_text: str,
-        translated_text: str,
-        language: str,
-    ) -> Optional[str]:
-        """원본 이미지의 텍스트를 번역 텍스트로 교체한 새 이미지 생성"""
-        import base64
-
-        await self.translator._wait_for_rate_limit()
-
-        from google.genai import types
-
-        lang_name = "English" if language == "en" else "Japanese"
-
-        image_part = types.Part.from_bytes(
-            data=image_data, mime_type=mime,
-        )
-
-        prompt = (
-            f"Edit this image: replace all Korean text with {lang_name} text.\n"
-            f"Korean text found: {ocr_text[:200]}\n"
-            f"{lang_name} translation: {translated_text[:200]}\n\n"
-            f"Keep the original layout, colors, and design exactly.\n"
-            f"Only replace text. Match font size and position."
-        )
-
-        response = self.translator.client.models.generate_content(
-            model=self.translator._model_name,  # gemini-2.0-flash 등 (동적)
-            contents=[prompt, image_part],
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"],
-            ),
-        )
-
-        if response and response.candidates:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    img_bytes = part.inline_data.data
-                    return base64.b64encode(img_bytes).decode('utf-8')
-
-        return None
+    # (이미지 생성 메서드 제거됨 — GB는 텍스트 중심 상세 설명 사용)
 
     # ──────────────── Private: Gemini API 호출 ────────────────
 
