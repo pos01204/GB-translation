@@ -93,32 +93,41 @@ class ArtistWebSession:
             await self.initialize()
 
         try:
+            logger.info(f"로그인 시도: {settings.artist_web_base_url}/login")
             await self.page.goto(
                 f"{settings.artist_web_base_url}/login",
                 timeout=settings.page_load_timeout,
             )
-            await self.page.wait_for_load_state("networkidle")
+            # networkidle 대신 domcontentloaded 사용 (더 빠름)
+            await self.page.wait_for_load_state("domcontentloaded")
+            logger.info(f"로그인 페이지 로드 완료: {self.page.url}")
 
             # 이메일 입력
             email_input = self.page.locator('input[type="email"], input[name="email"]')
-            await email_input.wait_for(state="visible", timeout=10000)
+            await email_input.wait_for(state="visible", timeout=15000)
             await email_input.fill(email)
+            logger.info("이메일 입력 완료")
 
             # 비밀번호 입력
             password_input = self.page.locator('input[type="password"], input[name="password"]')
+            await password_input.wait_for(state="visible", timeout=5000)
             await password_input.fill(password)
+            logger.info("비밀번호 입력 완료")
 
             # 로그인 버튼 클릭
             login_button = self.page.locator(
                 'button:has-text("로그인"), button[type="submit"]'
             ).first
+            await login_button.wait_for(state="visible", timeout=5000)
             await login_button.click()
+            logger.info("로그인 버튼 클릭 완료")
 
-            # 로그인 성공 확인 (대시보드로 이동되는지)
+            # 로그인 성공 확인 (URL 변경 대기 — 30초)
             await self.page.wait_for_url(
                 lambda url: "/login" not in url,
-                timeout=settings.artist_web_login_timeout,
+                timeout=30000,
             )
+            logger.info(f"로그인 후 URL: {self.page.url}")
             self._authenticated = True
             # 자동 재로그인용 인증 정보 저장 (컨테이너 재시작 대비)
             self._saved_email = email
