@@ -351,14 +351,12 @@ class ProductReader:
             logger.warning(f"작품 설명 수정하기 버튼 처리 중 오류: {e}")
 
     async def _read_title(self) -> str:
-        """작품명 추출"""
+        """작품명 추출 — name="productName" textarea"""
         try:
-            # 다양한 셀렉터 시도
             selectors = [
+                'textarea[name="productName"]',
                 'textarea[placeholder*="작품명"]',
-                'input[placeholder*="작품명"]',
-                'input[name*="title"]',
-                'textarea[name*="title"]',
+                'input[name="productName"]',
             ]
             for sel in selectors:
                 el = self.page.locator(sel).first
@@ -371,11 +369,10 @@ class ProductReader:
         return ""
 
     async def _read_price(self) -> int:
-        """가격 추출"""
+        """가격 추출 — name="product_price" input"""
         try:
-            # 가격 관련 input 필드
             price_input = self.page.locator(
-                'input[name*="price"], input[placeholder*="가격"]'
+                'input[name="product_price"]'
             ).first
             if await price_input.count() > 0:
                 val = await price_input.input_value()
@@ -385,122 +382,38 @@ class ProductReader:
         return 0
 
     async def _read_quantity(self, price: int = 0) -> int:
-        """수량 추출 — Vuetify .v-text-field 기반 탐색"""
+        """수량 추출 — name="stock" input"""
         try:
-            # 전략 1: JS로 Vuetify input 그룹에서 "수량" 라벨을 가진 필드 탐색
-            quantity = await self.page.evaluate("""
-                (price) => {
-                    // Vuetify v-input / v-text-field 그룹 탐색
-                    const vInputs = document.querySelectorAll('.v-input, .v-text-field');
-                    for (const vInput of vInputs) {
-                        const label = vInput.querySelector('label, .v-label');
-                        if (!label) continue;
-                        const labelText = label.textContent.trim();
-                        if (!labelText.includes('수량')) continue;
-
-                        const input = vInput.querySelector('input');
-                        if (!input || !input.value) continue;
-
-                        const val = parseInt(input.value.replace(/[^\\d]/g, ''), 10);
-                        if (isNaN(val)) continue;
-
-                        // 가격과 동일하면 잘못 읽은 것 — 수량이 아님
-                        if (price > 0 && val === price) {
-                            return -1;  // sentinel: price collision
-                        }
-                        return val;
-                    }
-
-                    // 전략 2: placeholder나 name에 수량 관련 키워드
-                    const inputs = document.querySelectorAll('input');
-                    for (const input of inputs) {
-                        const ph = input.placeholder || '';
-                        const nm = input.name || '';
-                        if ((ph + nm).includes('수량') || (ph + nm).toLowerCase().includes('quantity') || (ph + nm).toLowerCase().includes('stock')) {
-                            const val = parseInt(input.value.replace(/[^\\d]/g, ''), 10);
-                            if (isNaN(val)) continue;
-                            if (price > 0 && val === price) return -1;
-                            return val;
-                        }
-                    }
-
-                    // 전략 3: label 텍스트 "수량" 근처의 input
-                    const allLabels = document.querySelectorAll('label, .label, [class*="label"]');
-                    for (const lbl of allLabels) {
-                        if (!lbl.textContent.trim().includes('수량')) continue;
-                        // 같은 부모 컨테이너 내 input 탐색
-                        const container = lbl.closest('.v-input, .form-group, .field, [class*="row"], [class*="group"]')
-                            || lbl.parentElement;
-                        if (!container) continue;
-                        const input = container.querySelector('input');
-                        if (!input || !input.value) continue;
-                        const val = parseInt(input.value.replace(/[^\\d]/g, ''), 10);
-                        if (isNaN(val)) continue;
-                        if (price > 0 && val === price) return -1;
-                        return val;
-                    }
-
-                    return 0;
-                }
-            """, price)
-
-            if quantity == -1:
-                logger.warning(
-                    f"수량 값이 가격({price})과 동일 — 가격 필드를 수량으로 잘못 읽었을 가능성. 0으로 반환"
-                )
-                return 0
-
-            return quantity if quantity and quantity > 0 else 0
-
+            stock_input = self.page.locator('input[name="stock"]').first
+            if await stock_input.count() > 0:
+                val = await stock_input.input_value()
+                qty = int(re.sub(r'[^\d]', '', val)) if val else 0
+                if price > 0 and qty == price:
+                    logger.warning(f"수량({qty})이 가격({price})과 동일 — 잘못된 추출 가능성")
+                    return 0
+                return qty
         except Exception as e:
             logger.warning(f"수량 추출 실패: {e}")
         return 0
 
     async def _read_made_to_order(self) -> bool:
-        """주문 시 제작 여부"""
+        """주문 시 제작 여부 — name="product_custom_order_checkbox" """
         try:
-            checkbox = self.page.locator(
-                'input[type="checkbox"]'
-            ).filter(has=self.page.locator('text=주문 시 제작'))
-            if await checkbox.count() > 0:
-                return await checkbox.is_checked()
-
-            # 대안: 체크박스 라벨 탐색
-            label = self.page.locator('label:has-text("주문 시 제작")')
-            if await label.count() > 0:
-                cb = label.locator('input[type="checkbox"]')
-                if await cb.count() > 0:
-                    return await cb.is_checked()
+            cb = self.page.locator('input[name="product_custom_order_checkbox"]').first
+            if await cb.count() > 0:
+                return await cb.is_checked()
         except Exception as e:
             logger.warning(f"주문제작 여부 추출 실패: {e}")
         return False
 
     async def _read_category(self) -> str:
-        """카테고리 경로 추출"""
+        """카테고리 경로 추출 — name="productCategory" hidden input"""
         try:
-            # 카테고리 영역에서 '>' 포함 텍스트 찾기
-            category_el = self.page.locator(
-                '[class*="category"], [class*="Category"]'
-            ).filter(has_text=re.compile(r'>'))
-            if await category_el.count() > 0:
-                return (await category_el.first.inner_text()).strip()
-
-            # 대안: 전체 페이지에서 카테고리 패턴 탐색
-            all_text = await self.page.evaluate("""
-                () => {
-                    const els = document.querySelectorAll('p, span, div');
-                    for (const el of els) {
-                        const text = el.textContent.trim();
-                        if (text.includes('>') && text.length < 100
-                            && (text.includes('/') || text.includes('케이스')
-                                || text.includes('액세서리'))) {
-                            return text;
-                        }
-                    }
-                    return '';
-                }
-            """)
-            return all_text
+            cat_input = self.page.locator('input[name="productCategory"]').first
+            if await cat_input.count() > 0:
+                val = await cat_input.input_value()
+                if val:
+                    return val.strip()
         except Exception as e:
             logger.warning(f"카테고리 추출 실패: {e}")
         return ""
@@ -832,151 +745,105 @@ class ProductReader:
         return ""
 
     async def _read_options(self) -> list[DomesticOption]:
-        """옵션 목록 추출 — Vuetify chip 지원 및 추가금액 파싱"""
+        """옵션 목록 추출 — Vue 인스턴스 데이터 직접 접근"""
         options = []
         try:
+            # 전략 1: hidden input product_option의 Vue 바인딩 데이터를 직접 읽기
+            # [object Object] 문자열이 아니라 Vue가 바인딩한 실제 JS 객체를 읽음
             options_data = await self.page.evaluate("""
                 () => {
                     const result = [];
 
-                    // 추가 가격 파싱: "+1,000원", "+500원" 등
-                    function parseAdditionalPrice(text) {
-                        const match = text.match(/\\+\\s*([\\d,]+)\\s*원/);
-                        if (match) {
-                            return parseInt(match[1].replace(/,/g, ''), 10) || 0;
-                        }
-                        return 0;
-                    }
+                    // 1. product_option hidden input에서 Vue 바인딩 데이터 접근
+                    const optionInput = document.querySelector('input[name="product_option"]');
+                    if (optionInput) {
+                        // Vue 2/3 인스턴스에서 데이터 접근 시도
+                        let vueData = null;
 
-                    // 전략 1: 옵션 섹션 내 input + chip/tag 기반 추출
-                    const optionSections = document.querySelectorAll(
-                        '[class*="option"], [class*="Option"]'
-                    );
-                    for (const section of optionSections) {
-                        const nameEl = section.querySelector(
-                            'input[placeholder*="옵션명"], [class*="name"] input, input[placeholder*="옵션"]'
-                        );
-                        if (!nameEl) continue;
-                        const name = nameEl.value;
-                        if (!name) continue;
-
-                        const values = [];
-
-                        // Vuetify v-chip 기반 값 추출
-                        const chips = section.querySelectorAll('.v-chip, [class*="chip"], [class*="tag"]');
-                        for (const chip of chips) {
-                            const chipText = chip.textContent?.trim();
-                            if (!chipText || chipText === 'x' || chipText === '×'
-                                || chipText === name) continue;
-                            // 닫기 버튼 텍스트 제거
-                            const cleanText = chipText.replace(/[×x✕✖]$/g, '').trim();
-                            if (!cleanText) continue;
-                            values.push({
-                                value: String(cleanText),
-                                additional_price: parseAdditionalPrice(cleanText),
-                            });
-                        }
-
-                        // input/select 기반 값 추출
-                        if (values.length === 0) {
-                            const valueEls = section.querySelectorAll(
-                                '[class*="value"] input, [class*="item"] input'
-                            );
-                            for (const valEl of valueEls) {
-                                const val = valEl.value || valEl.textContent?.trim();
-                                if (val && val !== name && val !== 'x' && val !== '×') {
-                                    values.push({
-                                        value: String(val),
-                                        additional_price: parseAdditionalPrice(String(val)),
-                                    });
-                                }
-                            }
-                        }
-
-                        if (values.length > 0) {
-                            result.push({ name: String(name), values, option_type: "basic" });
-                        }
-                    }
-
-                    if (result.length > 0) return result;
-
-                    // 전략 2: Vuetify v-input 그룹 기반
-                    const vInputGroups = document.querySelectorAll('.v-input, .v-text-field');
-                    for (const vInput of vInputGroups) {
-                        const label = vInput.querySelector('label, .v-label');
-                        if (!label) continue;
-                        const labelText = label.textContent?.trim();
-                        if (!labelText || !labelText.includes('옵션') || labelText.length > 30) continue;
-
-                        const container = vInput.closest(
-                            '[class*="option"], [class*="Option"], [class*="row"], [class*="group"]'
-                        ) || vInput.parentElement;
-                        if (!container) continue;
-
-                        const chips = container.querySelectorAll('.v-chip');
-                        if (chips.length > 0) {
-                            const values = [];
-                            for (const chip of chips) {
-                                const text = chip.textContent?.trim().replace(/[×x✕✖]$/g, '').trim();
-                                if (text) {
-                                    values.push({
-                                        value: String(text),
-                                        additional_price: parseAdditionalPrice(text),
-                                    });
-                                }
-                            }
-                            if (values.length > 0) {
-                                result.push({
-                                    name: String(labelText.replace(/[:\\s]*$/, '')),
-                                    values,
-                                    option_type: "basic",
-                                });
-                            }
-                        }
-                    }
-
-                    if (result.length > 0) return result;
-
-                    // 전략 3: "옵션" 텍스트 라벨 근처의 input/select 요소
-                    const labels = document.querySelectorAll('label, div, span, p');
-                    for (const label of labels) {
-                        const text = label.textContent?.trim();
-                        if (!text || !text.includes('옵션') || text.length > 30) continue;
-
-                        const container = label.closest(
-                            '[class*="option"], [class*="Option"], [class*="row"], [class*="group"]'
-                        ) || label.parentElement;
-                        if (!container) continue;
-
-                        const inputs = container.querySelectorAll('input:not([type="hidden"]), select');
-                        for (const input of inputs) {
-                            const val = input.value;
-                            if (val) {
-                                result.push({
-                                    name: String(text.replace(/[:\\s]*$/, '')),
-                                    values: [{ value: String(val), additional_price: 0 }],
-                                    option_type: "basic",
-                                });
+                        // Vue 2: __vue__ 속성
+                        let el = optionInput;
+                        for (let i = 0; i < 10; i++) {
+                            if (el.__vue__) {
+                                vueData = el.__vue__;
                                 break;
                             }
+                            el = el.parentElement;
+                            if (!el) break;
+                        }
+
+                        // Vue 3: __vue_app__ / __vueParentComponent
+                        if (!vueData) {
+                            const app = document.querySelector('#app') || document.querySelector('[id*="app"]');
+                            if (app && app.__vue_app__) {
+                                // Vue 3 앱 인스턴스에서 탐색
+                                try {
+                                    const rootData = app.__vue_app__._instance?.proxy?.$data;
+                                    if (rootData) vueData = rootData;
+                                } catch(e) {}
+                            }
+                        }
+
+                        // Vue 데이터에서 옵션 정보 추출
+                        if (vueData) {
+                            // $data 또는 직접 속성에서 옵션 관련 데이터 탐색
+                            const data = vueData.$data || vueData;
+                            const optionKeys = ['product_option', 'productOption', 'options', 'option', 'optionList', 'option_list'];
+                            for (const key of optionKeys) {
+                                const val = data[key];
+                                if (val && typeof val === 'object') {
+                                    // 배열이면 직접 사용
+                                    if (Array.isArray(val)) {
+                                        for (const opt of val) {
+                                            if (opt && typeof opt === 'object') {
+                                                const name = opt.name || opt.option_name || opt.optionName || opt.title || '';
+                                                const values = opt.values || opt.option_values || opt.items || [];
+                                                if (name) {
+                                                    result.push({
+                                                        name: String(name),
+                                                        values: Array.isArray(values)
+                                                            ? values.map(v => ({
+                                                                value: String(typeof v === 'object' ? (v.value || v.name || v.label || JSON.stringify(v)) : v),
+                                                                additional_price: typeof v === 'object' ? (v.additional_price || v.additionalPrice || v.price || 0) : 0,
+                                                            }))
+                                                            : [{value: String(values), additional_price: 0}],
+                                                        option_type: opt.option_type || opt.type || 'basic',
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // 단일 객체이면 래핑
+                                    else if (!Array.isArray(val) && val.name) {
+                                        result.push({
+                                            name: String(val.name),
+                                            values: [{value: 'option', additional_price: 0}],
+                                            option_type: 'basic',
+                                        });
+                                    }
+                                    if (result.length > 0) break;
+                                }
+                            }
                         }
                     }
 
-                    // 전략 4: 페이지의 모든 input에서 옵션 관련 필드 탐색
-                    if (result.length === 0) {
-                        const allInputs = document.querySelectorAll('input');
-                        for (const input of allInputs) {
-                            const placeholder = input.placeholder || '';
-                            const name = input.name || '';
-                            if ((placeholder + name).toLowerCase().includes('option') ||
-                                (placeholder + name).includes('옵션')) {
-                                if (input.value) {
-                                    result.push({
-                                        name: String(placeholder || name || '옵션'),
-                                        values: [{ value: String(input.value), additional_price: 0 }],
-                                        option_type: "basic",
-                                    });
-                                }
+                    if (result.length > 0) return result;
+
+                    // 2. DOM에서 옵션 UI 요소 탐색 (폴백)
+                    const optionSections = document.querySelectorAll('[class*="option"], [class*="Option"]');
+                    for (const section of optionSections) {
+                        const nameEl = section.querySelector('input[placeholder*="옵션명"], input[placeholder*="옵션"]');
+                        if (!nameEl || !nameEl.value) continue;
+
+                        const values = [];
+                        const chips = section.querySelectorAll('.v-chip');
+                        for (const chip of chips) {
+                            const text = chip.textContent?.trim().replace(/[×x✕✖]$/g, '').trim();
+                            if (text && text.length > 0) {
+                                values.push({ value: String(text), additional_price: 0 });
+                            }
+                        }
+                        if (values.length > 0) {
+                            result.push({ name: String(nameEl.value), values, option_type: 'basic' });
                             }
                         }
                     }
@@ -1026,31 +893,29 @@ class ProductReader:
         return options
 
     async def _read_keywords(self) -> list[str]:
-        """키워드 추출"""
+        """키워드 추출 — name="product_keyword" hidden input"""
         try:
+            # 전략 1: hidden input에서 직접 읽기 (가장 정확)
+            kw_input = self.page.locator('input[name="product_keyword"]').first
+            if await kw_input.count() > 0:
+                val = await kw_input.input_value()
+                if val:
+                    # "#자개키링,#전통키링,..." 형식 → 파싱
+                    keywords = [k.strip().lstrip('#') for k in val.split(',') if k.strip()]
+                    if keywords:
+                        logger.info(f"키워드 추출: {len(keywords)}개 (hidden input)")
+                        return keywords
+
+            # 전략 2: Vuetify chip 또는 태그 요소
             keywords_data = await self.page.evaluate("""
                 () => {
-                    // 키워드 태그 요소 또는 키워드 입력 필드
-                    const tags = document.querySelectorAll(
-                        '[class*="keyword"] [class*="tag"], [class*="keyword"] span, [class*="keyword"] .v-chip'
-                    );
-                    if (tags.length > 0) {
-                        return Array.from(tags)
-                            .map(t => t.textContent.trim())
-                            .filter(t => t && t !== 'x' && t !== '×');
-                    }
-
-                    // Vuetify chip 기반 키워드
-                    const chipTags = document.querySelectorAll(
-                        '[class*="keyword"] .v-chip, [class*="tag"] .v-chip'
-                    );
+                    const chipTags = document.querySelectorAll('.v-chip');
                     if (chipTags.length > 0) {
                         return Array.from(chipTags)
                             .map(t => t.textContent.trim().replace(/[×x✕✖]$/g, '').trim())
-                            .filter(Boolean);
+                            .filter(t => t && t.length > 1);
                     }
 
-                    // 키워드 input 필드
                     const input = document.querySelector(
                         'input[placeholder*="키워드"], input[name*="keyword"]'
                     );
