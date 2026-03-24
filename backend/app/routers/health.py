@@ -508,3 +508,108 @@ async def debug_vuex_product():
     except Exception as e:
         logger.error(f"Vuex 디버그 실패: {e}")
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/option-modal", summary="옵션 모달 DOM 디버그")
+async def debug_option_modal():
+    """옵션 항목 클릭 → 모달 열기 → 모달 내 input 구조 확인"""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+
+    try:
+        page = _artist_session.page
+        result = {"currentUrl": page.url}
+
+        # 1단계: 옵션 섹션에서 클릭 가능한 요소 찾기
+        option_elements = await page.evaluate("""
+            () => {
+                const results = [];
+                // 모든 텍스트에서 "디자인" 찾기
+                const allEls = document.querySelectorAll('*');
+                for (const el of allEls) {
+                    if (el.children.length > 3) continue;  // 리프 노드에 가까운 것만
+                    const text = el.textContent?.trim();
+                    if (text === '디자인' || text === '= 디자인') {
+                        results.push({
+                            tag: el.tagName,
+                            text: text,
+                            classes: (el.className || '').toString().substring(0, 100),
+                            clickable: el.tagName === 'BUTTON' || el.tagName === 'A' || el.style?.cursor === 'pointer' || el.onclick !== null,
+                            parentTag: el.parentElement?.tagName,
+                            parentClasses: (el.parentElement?.className || '').toString().substring(0, 100),
+                        });
+                    }
+                }
+                return results;
+            }
+        """)
+        result["optionElements"] = option_elements
+
+        # 2단계: "디자인" 텍스트 클릭 시도
+        clicked = False
+        try:
+            el = page.locator('text="디자인"').first
+            if await el.count() > 0:
+                await el.click()
+                await asyncio.sleep(1.5)
+                clicked = True
+        except Exception as e:
+            result["clickError"] = str(e)
+
+        result["clicked"] = clicked
+
+        # 3단계: 모달/다이얼로그 확인
+        if clicked:
+            modal_info = await page.evaluate("""
+                () => {
+                    // 활성 다이얼로그 찾기
+                    const dialogs = document.querySelectorAll(
+                        '.v-dialog, .v-dialog--active, [role="dialog"], .v-overlay--active .v-card'
+                    );
+                    const activeDialogs = Array.from(dialogs).filter(d =>
+                        d.offsetParent !== null || d.style.display !== 'none'
+                    );
+
+                    if (activeDialogs.length === 0) {
+                        return { found: false, dialogCount: dialogs.length };
+                    }
+
+                    const modal = activeDialogs[activeDialogs.length - 1];
+                    const inputs = Array.from(modal.querySelectorAll('input')).map(inp => ({
+                        type: inp.type,
+                        name: inp.name || '',
+                        value: inp.value || '',
+                        placeholder: inp.placeholder || '',
+                        label: (() => {
+                            const c = inp.closest('.v-input, .v-text-field, [class*="field"]');
+                            const l = c?.querySelector('label, .v-label');
+                            return l?.textContent?.trim() || '';
+                        })(),
+                    }));
+
+                    return {
+                        found: true,
+                        dialogCount: activeDialogs.length,
+                        modalTag: modal.tagName,
+                        modalClasses: (modal.className || '').substring(0, 100),
+                        modalText: modal.textContent.substring(0, 300),
+                        inputCount: inputs.length,
+                        inputs: inputs,
+                    };
+                }
+            """)
+            result["modal"] = modal_info
+
+            # 모달 닫기
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
