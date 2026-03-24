@@ -661,41 +661,22 @@ class ArtistWebSession:
         # 이미 해당 작품 페이지에 있으면 네비게이션 스킵
         if product_id in (self.page.url or ""):
             logger.info(f"이미 작품 페이지에 위치: {product_id}")
+            # 이미 있어도 Vuex 데이터 로딩 대기
+            await self._wait_for_vuex_product_data(product_id)
             return True
 
-        # SPA 내부 네비게이션 — page.goto 대신 location.href 사용 (ERR_ABORTED 방지)
-        target_path = f"/product/{product_id}"
+        # 전체 URL로 네비게이션 (상대 경로 X)
+        full_url = f"{settings.artist_web_base_url}/product/{product_id}"
+        logger.info(f"작품 페이지 이동: {full_url}")
+
         try:
-            logger.info(f"작품 페이지 이동: {target_path}")
-            await self.page.evaluate(
-                f"window.location.href = '{target_path}'"
-            )
-            await asyncio.sleep(4)  # SPA 라우팅 + 렌더링 대기
-
-            # Vuex 데이터 로딩 대기 — productForm._item이 채워질 때까지
-            for attempt in range(10):
-                has_data = await self.page.evaluate("""
-                    () => {
-                        const app = document.querySelector('#app');
-                        if (!app || !app.__vue__ || !app.__vue__.$store) return false;
-                        const item = app.__vue__.$store.state.productForm?._item;
-                        return item && item.id > 0;
-                    }
-                """)
-                if has_data:
-                    logger.info(f"Vuex 데이터 로딩 확인 (시도 {attempt + 1})")
-                    break
-                await asyncio.sleep(1)
-
+            await self.page.goto(full_url, timeout=settings.page_load_timeout)
+            await self.page.wait_for_load_state("domcontentloaded")
         except Exception as e:
-            logger.warning(f"SPA 네비게이션 실패, page.goto 폴백: {e}")
-            try:
-                url = f"{settings.artist_web_base_url}/product/{product_id}"
-                await self.page.goto(url, timeout=settings.page_load_timeout)
-                await self.page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(3)
-            except Exception as e2:
-                logger.error(f"page.goto 폴백도 실패: {e2}")
+            logger.warning(f"page.goto 실패 (계속 진행): {e}")
+
+        # Vuex 데이터 로딩 대기 (이미지 포함)
+        await self._wait_for_vuex_product_data(product_id)
 
         success = "product" in self.page.url
         if success:
@@ -703,6 +684,46 @@ class ArtistWebSession:
         else:
             logger.warning(f"작품 페이지 이동 실패: {product_id} → {self.page.url}")
         return success
+
+    async def _wait_for_vuex_product_data(self, product_id: str):
+        """Vuex productForm._item에 이미지 데이터가 로딩될 때까지 대기"""
+        for attempt in range(20):  # 최대 20초 대기
+            try:
+                status = await self.page.evaluate("""
+                    () => {
+                        const app = document.querySelector('#app');
+                        if (!app || !app.__vue__ || !app.__vue__.$store) return { ready: false, reason: 'no_store' };
+                        const item = app.__vue__.$store.state.productForm?._item;
+                        if (!item || !item.id || item.id === 0) return { ready: false, reason: 'no_item' };
+                        const hasImages = Array.isArray(item.images) && item.images.length > 0;
+                        return {
+                            ready: hasImages,
+                            reason: hasImages ? 'ok' : 'no_images',
+                            id: item.id,
+                            imageCount: Array.isArray(item.images) ? item.images.length : 0,
+                            name: (item.productName || '').substring(0, 30),
+                        };
+                    }
+                """)
+
+                if status and status.get("ready"):
+                    logger.info(
+                        f"[Vuex 대기] 완료 — 시도 {attempt + 1}, "
+                        f"이미지 {status.get('imageCount')}개, "
+                        f"제목: {status.get('name')}"
+                    )
+                    return
+
+                if attempt % 5 == 4:
+                    logger.info(f"[Vuex 대기] 진행 중... 시도 {attempt + 1}, 상태: {status}")
+
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"[Vuex 대기] evaluate 오류: {e}")
+
+            await asyncio.sleep(1)
+
+        logger.warning(f"[Vuex 대기] 20초 타임아웃 — 이미지 없이 계속 진행")
 
     async def close(self):
         """세션 정리"""
