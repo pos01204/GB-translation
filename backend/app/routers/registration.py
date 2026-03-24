@@ -133,12 +133,27 @@ async def register_single(request: RegisterSingleRequest):
                 target_languages=request.target_languages,
             )
 
+        # 국내 이미지 URL 목록 (글로벌에 복사할 이미지)
+        domestic_image_urls = []
+        if domestic_data and hasattr(domestic_data, 'product_images'):
+            domestic_image_urls = [
+                img.url for img in domestic_data.product_images
+                if hasattr(img, 'url') and img.url
+            ]
+        if not domestic_image_urls and domestic_data:
+            # product_images가 ProductImage 객체가 아닌 경우
+            domestic_image_urls = [
+                str(img) for img in (domestic_data.product_images or [])
+                if img
+            ]
+
         # 글로벌 탭 자동 입력
         writer = ProductWriter(page=_artist_session.page)
         result = await writer.register_global_product(
             global_data=global_data,
             product_id=request.product_id,
             save_as_draft=request.save_as_draft,
+            domestic_images=domestic_image_urls,
         )
 
         success = len(result["languages_success"]) > 0
