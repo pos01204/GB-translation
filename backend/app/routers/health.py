@@ -454,72 +454,48 @@ async def debug_deep_extract(product_id: str = ""):
 
 
 @router.get("/api/debug/vuex-product", summary="Vuex 스토어 제품 데이터")
-async def debug_vuex_product(product_id: str = ""):
-    """Vuex 스토어에서 제품 이미지, 옵션, 설명 데이터를 추출합니다."""
-    import asyncio
+async def debug_vuex_product():
+    """현재 페이지의 Vuex 스토어에서 제품 데이터를 읽습니다. 네비게이션 없음."""
 
     if not _artist_session or not _artist_session.page:
         return {"error": "세션 미초기화"}
-    if not await _artist_session.is_authenticated():
-        return {"error": "로그인 필요"}
-    if not product_id:
-        return {"error": "product_id 필요"}
 
     try:
         page = _artist_session.page
 
-        # 네비게이션 — 에러 시 무시하고 현재 페이지에서 시도
-        try:
-            if product_id not in page.url:
-                await page.goto(f"https://artist.idus.com/product/{product_id}", timeout=30000)
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(3)
-        except Exception as nav_err:
-            logger.warning(f"네비게이션 실패 (현재 페이지에서 시도): {nav_err}")
-            await asyncio.sleep(2)
-
         result = await page.evaluate("""
             () => {
-                const output = {};
+                const output = { currentUrl: window.location.href };
                 const app = document.querySelector('#app');
                 if (!app || !app.__vue__ || !app.__vue__.$store) {
-                    return { error: 'Vuex store not found' };
+                    return { ...output, error: 'Vuex store not found' };
                 }
                 const store = app.__vue__.$store;
                 const state = store.state;
 
-                // productForm._item (이미지, 옵션, 설명 등 폼 데이터)
-                if (state.productForm && state.productForm._item) {
-                    const item = state.productForm._item;
-                    output.formItemKeys = Object.keys(item);
-                    // 이미지 관련 필드
-                    for (const key of Object.keys(item)) {
-                        const lk = key.toLowerCase();
-                        if (lk.includes('image') || lk.includes('photo') || lk.includes('img')) {
-                            try { output['form_' + key] = JSON.stringify(item[key]); }
-                            catch(e) { output['form_' + key] = String(item[key]).substring(0, 500); }
-                        }
-                        if (lk.includes('option')) {
-                            try { output['form_' + key] = JSON.stringify(item[key]); }
-                            catch(e) { output['form_' + key] = String(item[key]).substring(0, 500); }
-                        }
-                        if (lk.includes('premium') || lk.includes('description') || lk.includes('desc')) {
-                            try { output['form_' + key] = JSON.stringify(item[key]); }
-                            catch(e) { output['form_' + key] = String(item[key]).substring(0, 500); }
-                        }
-                    }
-                }
+                output.vuexModules = Object.keys(state);
 
-                // product 스토어
-                if (state.product) {
-                    output.productStoreKeys = Object.keys(state.product);
-                }
+                // 모든 제품 관련 Vuex 모듈 덤프
+                const moduleNames = ['productForm', 'product', 'globalProduct', 'productPreview'];
+                for (const mod of moduleNames) {
+                    if (!state[mod]) continue;
+                    const modData = state[mod];
+                    output[mod + '_keys'] = Object.keys(modData);
 
-                // globalProduct 스토어
-                if (state.globalProduct) {
-                    output.globalProductKeys = Object.keys(state.globalProduct);
-                    if (state.globalProduct._detail) {
-                        output.globalDetailKeys = Object.keys(state.globalProduct._detail);
+                    // 각 키의 값을 최대한 추출
+                    for (const key of Object.keys(modData)) {
+                        const val = modData[key];
+                        if (val === null || val === undefined) continue;
+                        const fullKey = mod + '.' + key;
+                        try {
+                            const json = JSON.stringify(val);
+                            // 2000자까지만 (너무 큰 데이터 방지)
+                            output[fullKey] = json.length > 2000
+                                ? json.substring(0, 2000) + '...(truncated)'
+                                : json;
+                        } catch(e) {
+                            output[fullKey] = String(val).substring(0, 500);
+                        }
                     }
                 }
 
