@@ -94,79 +94,85 @@ class ProductWriter:
             return True
         return False
 
-    # ──────────── Vuex 일괄 주입 ────────────
+    # ──────────── Vuex commit + dispatch ────────────
 
-    async def inject_all_data_via_vuex(
+    async def inject_and_save_via_vuex(
         self,
         language: str,
         title: str,
         images: list[str],
         keywords: list[str],
         description_blocks: list[dict],
+        save_as_draft: bool = True,
     ) -> bool:
-        """모든 폼 데이터를 Vuex _detailUI에 일괄 주입
+        """Vuex setDetailUI mutation → insertGlobalProductDraft/Detail action
 
-        DOM 모달 상호작용 완전 제거 — Vuex 직접 조작만 사용
+        확인된 Vuex 구조:
+        - mutation: globalProduct/setDetailUI → _detailUI 데이터 설정
+        - action: globalProduct/insertGlobalProductDraft → 임시저장 API 호출
+        - action: globalProduct/insertGlobalProductDetail → 판매 등록 API 호출
         """
         try:
             result = await self.page.evaluate("""
-                (data) => {
+                async (data) => {
                     const app = document.querySelector('#app');
                     if (!app || !app.__vue__ || !app.__vue__.$store) {
                         return { success: false, error: 'Vuex store not found' };
                     }
                     const store = app.__vue__.$store;
-                    const ui = store.state.globalProduct?._detailUI;
-                    if (!ui) {
+
+                    // 1. _detailUI 현재 상태 가져오기
+                    const currentUI = store.state.globalProduct?._detailUI;
+                    if (!currentUI) {
                         return { success: false, error: '_detailUI not found' };
                     }
 
-                    // Vue.set()으로 반응형 주입 (Vue 2 reactive system 대응)
-                    const Vue = app.__vue__.$options._base
-                        || app.__vue__.constructor
-                        || window.Vue;
-
-                    if (Vue && Vue.set) {
-                        Vue.set(ui, 'productName', data.title || '');
-                        Vue.set(ui, 'images', data.images || []);
-                        Vue.set(ui, 'keywords', data.keywords || []);
-                        Vue.set(ui, 'premiumDescription', data.blocks || []);
-                    } else {
-                        // Vue.set 없으면 직접 대입 + $forceUpdate
-                        ui.productName = data.title || '';
-                        ui.images = data.images || [];
-                        ui.keywords = data.keywords || [];
-                        ui.premiumDescription = data.blocks || [];
-                    }
-
-                    // textarea에도 값 반영
-                    const textarea = document.querySelector('textarea[name="globalProductName"]');
-                    if (textarea) {
-                        textarea.value = data.title || '';
-                        textarea.dispatchEvent(new Event('input', { bubbles: true }));
-                    }
-
-                    return {
-                        success: true,
-                        injected: {
-                            title: (data.title || '').substring(0, 30),
-                            imageCount: (data.images || []).length,
-                            keywordCount: (data.keywords || []).length,
-                            blockCount: (data.blocks || []).length,
-                        }
+                    // 2. setDetailUI mutation으로 데이터 설정
+                    const newUI = {
+                        ...currentUI,
+                        productName: data.title || '',
+                        images: data.images || [],
+                        keywords: data.keywords || [],
+                        premiumDescription: data.blocks || [],
                     };
+                    store.commit('globalProduct/setDetailUI', newUI);
+
+                    // 3. 저장 action dispatch
+                    try {
+                        const actionName = data.saveDraft
+                            ? 'globalProduct/insertGlobalProductDraft'
+                            : 'globalProduct/insertGlobalProductDetail';
+                        await store.dispatch(actionName);
+                        return {
+                            success: true,
+                            action: actionName,
+                            injected: {
+                                title: (data.title || '').substring(0, 30),
+                                imageCount: (data.images || []).length,
+                                keywordCount: (data.keywords || []).length,
+                                blockCount: (data.blocks || []).length,
+                            }
+                        };
+                    } catch (err) {
+                        return {
+                            success: false,
+                            error: 'dispatch 실패: ' + (err.message || String(err)),
+                            mutation_ok: true,
+                        };
+                    }
                 }
             """, {
                 "title": title[:settings.title_max_length_global],
                 "images": images,
                 "keywords": keywords,
                 "blocks": description_blocks,
+                "saveDraft": save_as_draft,
             })
 
             if result.get("success"):
                 info = result.get("injected", {})
                 logger.info(
-                    f"Vuex 일괄 주입 완료: "
+                    f"Vuex 저장 완료 ({result.get('action', '?')}): "
                     f"제목={info.get('title', '')}..., "
                     f"이미지={info.get('imageCount', 0)}장, "
                     f"키워드={info.get('keywordCount', 0)}개, "
@@ -174,11 +180,33 @@ class ProductWriter:
                 )
                 return True
             else:
-                logger.error(f"Vuex 주입 실패: {result.get('error')}")
+                logger.error(f"Vuex 저장 실패: {result.get('error')}")
+                # mutation은 성공했지만 dispatch 실패한 경우
+                if result.get("mutation_ok"):
+                    logger.info("mutation 성공 — update action 시도")
+                    # update 시도 (이미 존재하는 경우)
+                    retry = await self.page.evaluate("""
+                        async (saveDraft) => {
+                            const store = document.querySelector('#app').__vue__.$store;
+                            try {
+                                const action = saveDraft
+                                    ? 'globalProduct/updateGlobalProductDraft'
+                                    : 'globalProduct/updateGlobalProductDetail';
+                                await store.dispatch(action);
+                                return { success: true, action: action };
+                            } catch (err) {
+                                return { success: false, error: String(err) };
+                            }
+                        }
+                    """, save_as_draft)
+                    if retry.get("success"):
+                        logger.info(f"Vuex update 저장 성공: {retry.get('action')}")
+                        return True
+                    logger.error(f"Vuex update도 실패: {retry.get('error')}")
                 return False
 
         except Exception as e:
-            logger.error(f"Vuex 주입 실패: {e}")
+            logger.error(f"Vuex 저장 실패: {e}")
             return False
 
     # ──────────── 옵션 (모달 — 유일한 DOM 상호작용) ────────────
@@ -310,41 +338,44 @@ class ProductWriter:
 
     # ──────────── 통합 ────────────
 
-    async def fill_language_data(
+    async def register_language(
         self, language: str, data: LanguageData,
         domestic_images: list[str] = None,
-        global_options: Optional[list[GlobalOption]] = None,
+        save_as_draft: bool = True,
     ) -> bool:
-        """특정 언어 — Vuex 일괄 주입 + 옵션 모달"""
-        lang_label = "영어" if language == "en" else "일본어"
-        logger.info(f"{lang_label} 데이터 입력 시작")
+        """특정 언어 — Vuex commit(setDetailUI) + dispatch(save action)
 
-        # 1. 언어 탭 선택
+        모든 데이터를 Vuex mutation으로 설정하고,
+        작가웹의 공식 저장 action을 dispatch하여 저장.
+        DOM 상호작용 없음.
+        """
+        lang_label = "영어" if language == "en" else "일본어"
+        logger.info(f"{lang_label} 등록 시작 (Vuex action 방식)")
+
+        # 1. 언어 탭 선택 (Vuex의 languageType 변경 트리거)
         if not await self.select_language_tab(language):
             return False
 
-        # 2. Vuex 일괄 주입 (이미지 + 작품명 + 설명 + 키워드)
+        # 2. 데이터 설정 + 저장 (1회 evaluate 호출)
         images = domestic_images or []
         blocks = data.description_blocks if hasattr(data, 'description_blocks') and data.description_blocks else []
         keywords = [kw.strip().lstrip('#') for kw in (data.keywords or []) if kw.strip()]
 
-        ok = await self.inject_all_data_via_vuex(
+        ok = await self.inject_and_save_via_vuex(
             language=language,
             title=data.title,
             images=images,
             keywords=keywords,
             description_blocks=blocks,
+            save_as_draft=save_as_draft,
         )
-        if not ok:
-            logger.error(f"{lang_label} Vuex 주입 실패")
-            return False
 
-        # 3. 옵션 (유일한 DOM 상호작용)
-        if global_options:
-            await self.fill_global_options(global_options, language)
+        if ok:
+            logger.info(f"{lang_label} 등록 성공")
+        else:
+            logger.error(f"{lang_label} 등록 실패")
 
-        logger.info(f"{lang_label} 데이터 입력 완료")
-        return True
+        return ok
 
     async def register_global_product(
         self, global_data: GlobalProductData,
@@ -352,11 +383,7 @@ class ProductWriter:
         target_languages: Optional[list[str]] = None,
         domestic_images: list[str] = None,
     ) -> dict:
-        """글로벌 탭 전체 등록
-
-        Args:
-            domestic_images: 국내 작품 이미지 URL 목록 (글로벌에 복사)
-        """
+        """글로벌 탭 전체 등록 — Vuex action dispatch 방식"""
         if target_languages is None:
             target_languages = []
             if global_data.ja:
@@ -376,17 +403,13 @@ class ProductWriter:
                 result["languages_failed"].append(lang)
                 continue
 
-            ok = await self.fill_language_data(
+            ok = await self.register_language(
                 language=lang, data=lang_data,
                 domestic_images=domestic_images or [],
-                global_options=global_data.global_options,
+                save_as_draft=save_as_draft,
             )
             if ok:
-                save_ok = (await self.save_draft(lang)) if save_as_draft else (await self.publish(lang))
-                if save_ok:
-                    result["languages_success"].append(lang)
-                else:
-                    result["languages_failed"].append(lang)
+                result["languages_success"].append(lang)
             else:
                 result["languages_failed"].append(lang)
 
