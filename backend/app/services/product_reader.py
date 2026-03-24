@@ -43,7 +43,17 @@ class ProductReader:
 
         if vuex_data and vuex_data.get("success"):
             logger.info(f"[Vuex] 데이터 추출 성공: {product_id}")
-            return self._build_product_from_vuex(product_id, vuex_data)
+            product = self._build_product_from_vuex(product_id, vuex_data)
+
+            # 국내 옵션이 비어있으면 DOM 모달에서 추출 시도
+            if not product.options:
+                logger.info("[Vuex] 옵션 비어있음 — DOM 모달에서 추출 시도")
+                dom_options = await self._read_options_from_modal()
+                if dom_options:
+                    product.options = dom_options
+                    logger.info(f"[DOM 모달] 옵션 {len(dom_options)}개 추출")
+
+            return product
 
         # Vuex 실패 시 DOM 폴백
         logger.warning(f"[Vuex] 데이터 추출 실패, DOM 폴백: {vuex_data}")
@@ -290,6 +300,171 @@ class ProductReader:
             f"키워드={len(product.keywords)})"
         )
         return product
+
+    async def _read_options_from_modal(self) -> list[DomesticOption]:
+        """DOM에서 옵션 항목을 클릭하여 모달의 옵션명/값/추가금액을 읽기"""
+        options = []
+        try:
+            # 옵션 섹션의 항목들 찾기 (= 아이콘 + 옵션명 텍스트)
+            option_items = await self.page.evaluate("""
+                () => {
+                    // 옵션 섹션 내 클릭 가능한 항목 찾기
+                    const items = [];
+                    // "옵션" 텍스트가 포함된 섹션 찾기
+                    const allEls = document.querySelectorAll('div, section, [class*="option"]');
+                    for (const el of allEls) {
+                        const header = el.querySelector('h2, h3, h4, [class*="title"], [class*="header"]');
+                        if (!header || !header.textContent.includes('옵션')) continue;
+                        // 이 섹션 내의 항목들
+                        const clickables = el.querySelectorAll('[draggable], [class*="item"], [class*="drag"]');
+                        for (const item of clickables) {
+                            const text = item.textContent.trim();
+                            if (text && text.length < 30 && text !== '옵션' && !text.includes('추가')) {
+                                items.push(text.replace(/^[=≡☰]/g, '').trim());
+                            }
+                        }
+                        break;
+                    }
+                    return items;
+                }
+            """)
+
+            logger.info(f"[DOM 모달] 옵션 항목 발견: {option_items}")
+
+            for option_name in option_items:
+                if not option_name:
+                    continue
+
+                try:
+                    # 옵션 항목 클릭하여 모달 열기
+                    option_el = self.page.locator(f'text="{option_name}"').first
+                    if await option_el.count() == 0:
+                        # 부분 매칭 시도
+                        option_el = self.page.locator(f':text("{option_name}")').first
+                    if await option_el.count() > 0:
+                        await option_el.click()
+                        await asyncio.sleep(1)  # 모달 렌더링 대기
+
+                        # 모달에서 옵션 데이터 읽기
+                        modal_data = await self.page.evaluate("""
+                            () => {
+                                // 모달/다이얼로그 찾기
+                                const modal = document.querySelector(
+                                    '.v-dialog--active, [class*="dialog"][class*="active"], [role="dialog"]'
+                                );
+                                if (!modal) return null;
+
+                                // 옵션명 input
+                                const nameInputs = modal.querySelectorAll('input[type="text"]');
+                                let optionName = '';
+                                for (const inp of nameInputs) {
+                                    const label = inp.closest('.v-input')?.querySelector('label, .v-label');
+                                    if (label && label.textContent.includes('옵션명')) {
+                                        optionName = inp.value;
+                                        break;
+                                    }
+                                    // 첫 번째 input이 옵션명일 가능성
+                                    if (!optionName && inp.value && inp.value.length < 20) {
+                                        optionName = inp.value;
+                                    }
+                                }
+
+                                // 옵션 값들: "옵션 값" 라벨 근처의 input들
+                                const values = [];
+                                const allInputs = Array.from(modal.querySelectorAll('input[type="text"]'));
+                                let inValues = false;
+                                for (let i = 0; i < allInputs.length; i++) {
+                                    const inp = allInputs[i];
+                                    const container = inp.closest('.v-input, [class*="field"]');
+                                    const label = container?.querySelector('label, .v-label');
+                                    const labelText = label?.textContent?.trim() || '';
+
+                                    if (labelText.includes('옵션 값') || labelText.includes('옵션값')) {
+                                        // 이 input은 옵션 값
+                                        if (inp.value) {
+                                            // 다음 input이 추가금액인지 확인
+                                            let addPrice = 0;
+                                            const nextInp = allInputs[i + 1];
+                                            if (nextInp) {
+                                                const nextLabel = nextInp.closest('.v-input, [class*="field"]')?.querySelector('label, .v-label');
+                                                if (nextLabel && nextLabel.textContent.includes('추가금액')) {
+                                                    addPrice = parseInt(nextInp.value.replace(/[^\\d]/g, ''), 10) || 0;
+                                                }
+                                            }
+                                            values.push({
+                                                value: inp.value.trim(),
+                                                additional_price: addPrice,
+                                            });
+                                        }
+                                    }
+                                }
+
+                                // 값을 못 찾았으면, 옵션명 이후의 모든 텍스트 input 시도
+                                if (values.length === 0) {
+                                    let foundName = false;
+                                    for (const inp of allInputs) {
+                                        if (inp.value === optionName) {
+                                            foundName = true;
+                                            continue;
+                                        }
+                                        if (foundName && inp.value && !inp.value.match(/^\\d+$/)) {
+                                            values.push({ value: inp.value.trim(), additional_price: 0 });
+                                        }
+                                    }
+                                }
+
+                                return { name: optionName, values: values };
+                            }
+                        """)
+
+                        if modal_data and modal_data.get("name"):
+                            opt_values = [
+                                OptionValue(
+                                    value=v.get("value", ""),
+                                    additional_price=v.get("additional_price", 0),
+                                )
+                                for v in modal_data.get("values", [])
+                                if v.get("value")
+                            ]
+                            options.append(DomesticOption(
+                                name=modal_data["name"],
+                                values=opt_values,
+                                option_type="basic",
+                            ))
+                            logger.info(
+                                f"[DOM 모달] 옵션 추출: {modal_data['name']} "
+                                f"({len(opt_values)}개 값)"
+                            )
+
+                        # 모달 닫기
+                        close_btn = self.page.locator(
+                            '.v-dialog--active button:has-text("×"), '
+                            '.v-dialog--active [aria-label="Close"], '
+                            '.v-dialog--active button:has-text("닫기"), '
+                            '.v-dialog--active .v-icon:has-text("close"), '
+                            '[class*="dialog"] button:first-child'
+                        ).first
+                        if await close_btn.count() > 0:
+                            await close_btn.click()
+                            await asyncio.sleep(0.5)
+                        else:
+                            # ESC 키로 닫기
+                            await self.page.keyboard.press("Escape")
+                            await asyncio.sleep(0.5)
+
+                except Exception as e:
+                    logger.warning(f"[DOM 모달] 옵션 '{option_name}' 처리 실패: {e}")
+                    # 모달이 열려있을 수 있으므로 ESC로 닫기
+                    try:
+                        await self.page.keyboard.press("Escape")
+                        await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logger.warning(f"[DOM 모달] 옵션 추출 전체 실패: {e}")
+
+        return options
 
     async def _read_from_dom(self, product_id: str) -> DomesticProduct:
         """DOM 폴백 — Vuex 실패 시 기본 input에서 읽기"""
