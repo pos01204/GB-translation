@@ -17,7 +17,8 @@ class ImageText(BaseModel):
 class LanguageData(BaseModel):
     """언어별 글로벌 등록 데이터"""
     title: str = Field(max_length=80)           # 글로벌 작품명
-    description_html: str = ""                  # 작품 설명 (HTML)
+    description_html: str = ""                  # 작품 설명 (HTML — 미리보기용)
+    description_blocks: list[dict] = []         # premiumDescription 블록 배열 (에디터용)
     keywords: list[str] = []                    # 작품 키워드
     use_domestic_images: bool = True            # 국내 이미지 불러오기 사용
     custom_image_urls: list[str] = []           # 별도 이미지 URL

@@ -91,8 +91,8 @@ class GBProductTranslator:
         # 3. AI 상세 설명 재구성 (EN/JA 각 1회) — KR 데이터 + OCR 텍스트 기반
         # 4. 옵션 번역
 
-        en_title, en_desc, en_keywords = "", "", []
-        ja_title, ja_desc, ja_keywords = "", "", []
+        en_title, en_desc, en_keywords, en_blocks = "", "", [], []
+        ja_title, ja_desc, ja_keywords, ja_blocks = "", "", [], []
 
         # 1. 이미지 OCR — 텍스트 수집 (1회, 이미지 생성 없음)
         ocr_texts: list[str] = []
@@ -114,18 +114,18 @@ class GBProductTranslator:
             )
             logger.info("JA 제목+키워드 완료")
 
-        # 3. AI 상세 설명 재구성 (KR 텍스트 + OCR 텍스트 → 새 GB 설명)
+        # 3. AI 상세 설명 재구성 → HTML + premiumDescription 블록 배열
         if do_en:
-            en_desc = await self._build_gb_description(
+            en_desc, en_blocks = await self._build_gb_description(
                 domestic, ocr_texts, "en",
             )
-            logger.info("EN 설명 재구성 완료")
+            logger.info(f"EN 설명 재구성 완료 ({len(en_blocks)} 블록)")
 
         if do_ja:
-            ja_desc = await self._build_gb_description(
+            ja_desc, ja_blocks = await self._build_gb_description(
                 domestic, ocr_texts, "ja",
             )
-            logger.info("JA 설명 재구성 완료")
+            logger.info(f"JA 설명 재구성 완료 ({len(ja_blocks)} 블록)")
 
         # 4. LanguageData 조립
         if do_en:
@@ -134,6 +134,7 @@ class GBProductTranslator:
                 description_html=en_desc,
                 keywords=en_keywords,
                 use_domestic_images=True,
+                description_blocks=en_blocks,
             )
         if do_ja:
             ja_data = LanguageData(
@@ -141,6 +142,7 @@ class GBProductTranslator:
                 description_html=ja_desc,
                 keywords=ja_keywords,
                 use_domestic_images=True,
+                description_blocks=ja_blocks,
             )
 
         # 5. 옵션 번역
@@ -268,12 +270,17 @@ class GBProductTranslator:
         domestic: DomesticProduct,
         ocr_texts: list[str],
         language: str,
-    ) -> str:
-        """KR 데이터 전체를 기반으로 GB 최적화 상세 설명을 AI로 재구성
+    ) -> tuple[str, list[dict]]:
+        """KR 데이터를 기반으로 GB 설명 생성 → (HTML, premiumDescription 블록 배열)
 
-        이미지는 포함하지 않음 (텍스트 중심, SEO 최적화)
+        Returns:
+            (description_html, description_blocks)
+            - description_html: 미리보기용 HTML
+            - description_blocks: 작가웹 에디터용 premiumDescription 블록 배열
         """
-        # 모든 KR 텍스트를 수집
+        import uuid as uuid_mod
+
+        # 모든 KR 텍스트 수집
         parts = []
         parts.append(f"제목: {domestic.title}")
         parts.append(f"카테고리: {domestic.category_path}")
@@ -284,7 +291,6 @@ class GBProductTranslator:
         if domestic.features:
             parts.append(f"특장점: {' / '.join(domestic.features)}")
         if domestic.description_html:
-            # HTML 태그 제거하여 순수 텍스트만
             import re
             clean_text = re.sub(r'<[^>]+>', ' ', domestic.description_html)
             clean_text = re.sub(r'\s+', ' ', clean_text).strip()
@@ -306,11 +312,73 @@ class GBProductTranslator:
         prompt = prompt_template.format(text=combined)
 
         result = await self._call_gemini(prompt, max_tokens=8000)
-        if result:
-            # HTML 태그가 없으면 후처리로 추가
-            result = self._ensure_html_tags(result)
-            return result
-        return f"<p>{domestic.title}</p>"
+        if not result:
+            fallback_html = f"<p>{domestic.title}</p>"
+            fallback_blocks = [self._make_block("TEXT", domestic.title)]
+            return fallback_html, fallback_blocks
+
+        # HTML 태그 보장
+        html = self._ensure_html_tags(result)
+
+        # HTML → premiumDescription 블록 배열 변환
+        blocks = self._html_to_blocks(html)
+
+        return html, blocks
+
+    @staticmethod
+    def _make_block(block_type: str, value: str = "") -> dict:
+        """premiumDescription 블록 1개 생성"""
+        import uuid as uuid_mod
+        return {
+            "uuid": f"auto_{uuid_mod.uuid4().hex[:12]}",
+            "type": block_type,
+            "label": "",
+            "value": value,
+        }
+
+    @staticmethod
+    def _html_to_blocks(html: str) -> list[dict]:
+        """HTML을 premiumDescription 블록 배열로 변환"""
+        import re
+        blocks = []
+
+        # HTML 태그 기반 분리
+        # <h3>...</h3> → SUBJECT, <p>...</p> → TEXT, <hr /> → LINE
+        parts = re.split(r'(<h[23][^>]*>.*?</h[23]>|<hr\s*/?>)', html, flags=re.DOTALL)
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            # h2/h3 → SUBJECT (타이틀)
+            h_match = re.match(r'<h[23][^>]*>(.*?)</h[23]>', part, re.DOTALL)
+            if h_match:
+                text = re.sub(r'<[^>]+>', '', h_match.group(1)).strip()
+                if text:
+                    blocks.append(GBProductTranslator._make_block("SUBJECT", text))
+                continue
+
+            # hr → LINE (구분선)
+            if re.match(r'<hr\s*/?>', part):
+                blocks.append(GBProductTranslator._make_block("LINE"))
+                continue
+
+            # 나머지: p 태그들 → TEXT
+            # 여러 <p>가 연속일 수 있으므로 각각 분리
+            p_parts = re.findall(r'<p[^>]*>(.*?)</p>', part, re.DOTALL)
+            if p_parts:
+                for p_text in p_parts:
+                    clean = re.sub(r'<[^>]+>', '', p_text).strip()
+                    if clean:
+                        blocks.append(GBProductTranslator._make_block("TEXT", clean))
+            else:
+                # 태그 없는 순수 텍스트
+                clean = re.sub(r'<[^>]+>', '', part).strip()
+                if clean:
+                    blocks.append(GBProductTranslator._make_block("TEXT", clean))
+
+        return blocks
 
     @staticmethod
     def _ensure_html_tags(text: str) -> str:

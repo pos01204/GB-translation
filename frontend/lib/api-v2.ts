@@ -82,9 +82,17 @@ export interface DomesticProduct {
   detail_images: ProductImage[]
 }
 
+export interface DescriptionBlock {
+  uuid: string
+  type: 'TEXT' | 'SUBJECT' | 'IMAGE' | 'SPLIT_IMAGE' | 'LINE' | 'BLANK'
+  label: string
+  value: string | string[]
+}
+
 export interface LanguageData {
   title: string
   description_html: string
+  description_blocks: DescriptionBlock[]
   keywords: string[]
   use_domestic_images: boolean
   image_texts: ImageText[]
