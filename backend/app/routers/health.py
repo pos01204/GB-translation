@@ -724,16 +724,31 @@ async def debug_global_elements():
                     pass
                 await asyncio.sleep(5)
 
-        # 충분히 대기
+        # 충분히 대기 — 메인 컨텐츠 영역 스크롤
         try:
             await page.wait_for_selector('textarea[name="globalProductName"]', timeout=10000)
         except Exception:
             pass
 
-        # 스크롤하여 lazy 렌더링 요소 로드
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(2)
-        await page.evaluate("window.scrollTo(0, 0)")
+        # Vuetify의 메인 스크롤 컨테이너 찾아서 스크롤
+        await page.evaluate("""
+            () => {
+                // 메인 컨텐츠 스크롤 (body가 아닌 내부 컨테이너)
+                const main = document.querySelector('.v-main__wrap, .v-main, main, [class*="content"]');
+                if (main) {
+                    main.scrollTop = main.scrollHeight;
+                }
+                window.scrollTo(0, document.body.scrollHeight);
+            }
+        """)
+        await asyncio.sleep(3)
+        await page.evaluate("""
+            () => {
+                const main = document.querySelector('.v-main__wrap, .v-main, main');
+                if (main) main.scrollTop = 0;
+                window.scrollTo(0, 0);
+            }
+        """)
         await asyncio.sleep(1)
 
         result = await page.evaluate("""
@@ -811,7 +826,24 @@ async def debug_global_elements():
                     }
                 }
 
-                // 5. 페이지 전체 텍스트에서 "이미지" "키워드" 포함 부분 추출
+                // 5. 페이지 전체 innerText (첫 3000자)
+                output.fullPageText = document.body.innerText?.substring(0, 3000) || '';
+
+                // 6. 메인 컨텐츠 영역 HTML 구조 (클래스만)
+                const mainContent = document.querySelector('.v-main__wrap, .v-main, main');
+                if (mainContent) {
+                    output.mainContentChildren = Array.from(mainContent.querySelectorAll('*'))
+                        .filter(el => el.offsetHeight > 0)
+                        .slice(0, 50)
+                        .map(el => ({
+                            tag: el.tagName,
+                            classes: (el.className || '').substring(0, 80),
+                            text: el.textContent?.trim().substring(0, 40),
+                            depth: 0, // simplified
+                        }));
+                }
+
+                // 7. 페이지 전체 텍스트에서 "이미지" "키워드" 포함 부분 추출
                 output.textWithImage = [];
                 output.textWithKeyword = [];
                 const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
