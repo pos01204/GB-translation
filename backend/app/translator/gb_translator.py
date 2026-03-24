@@ -357,14 +357,20 @@ class GBProductTranslator:
         domestic: DomesticProduct,
         korean_image_urls: set[str],
     ) -> list[str]:
-        """product_images + detail_images(한글 없는 것)에서 가용 이미지 URL 수집"""
+        """product_images + detail_images에서 한글 없는 이미지 URL만 수집
+
+        한글 감지 기준:
+        1. OCR에서 한글 문자가 검출된 이미지 (korean_image_urls)
+        2. product_images는 보통 제품 실물 사진이므로 포함
+           단, OCR에서 한글이 검출된 URL은 제외
+        """
         urls = []
         seen = set()
 
-        # product_images (한글 없음 확실)
+        # product_images (OCR에서 한글 검출된 것은 제외)
         for img in domestic.product_images:
             url = img.url
-            if url and url not in seen:
+            if url and url not in seen and url not in korean_image_urls:
                 urls.append(url)
                 seen.add(url)
 
@@ -382,12 +388,9 @@ class GBProductTranslator:
         text_blocks: list[dict],
         available_images: list[str],
     ) -> list[dict]:
-        """텍스트 블록 사이에 이미지를 적절히 삽입
+        """텍스트 블록 사이에 IMAGE(1장) 블록을 적절히 삽입
 
-        전략:
-        - SUBJECT 뒤 TEXT 1-2개 후에 이미지 배치
-        - 이미지 2장이 남으면 SPLIT_IMAGE, 1장이면 IMAGE
-        - SUBJECT 사이에 BLANK + LINE + BLANK로 시각적 구분
+        에디터에서 SPLIT_IMAGE(2장 나란히)는 미지원 → IMAGE만 사용.
         """
         if not available_images:
             return text_blocks
@@ -397,7 +400,7 @@ class GBProductTranslator:
         text_count_since_image = 0
         subject_count = 0
 
-        for i, block in enumerate(text_blocks):
+        for block in text_blocks:
             # SUBJECT 전에 구분선 삽입 (첫 번째 제외)
             if block["type"] == "SUBJECT" and subject_count > 0:
                 result.append(GBProductTranslator._make_block("BLANK"))
@@ -412,29 +415,19 @@ class GBProductTranslator:
             elif block["type"] == "TEXT":
                 text_count_since_image += 1
 
-                # TEXT 1-2개 후에 이미지 삽입
+                # TEXT 1-2개 후에 이미지 1장 삽입
                 if text_count_since_image >= 2 and img_queue:
                     result.append(GBProductTranslator._make_block("BLANK"))
-                    if len(img_queue) >= 2 and subject_count % 2 == 0:
-                        # SPLIT_IMAGE (2장 나란히)
-                        urls = [img_queue.pop(0), img_queue.pop(0)]
-                        result.append(GBProductTranslator._make_block("SPLIT_IMAGE", urls))
-                    else:
-                        # IMAGE (1장)
-                        url = img_queue.pop(0)
-                        result.append(GBProductTranslator._make_block("IMAGE", [url]))
+                    url = img_queue.pop(0)
+                    result.append(GBProductTranslator._make_block("IMAGE", [url]))
                     result.append(GBProductTranslator._make_block("BLANK"))
                     text_count_since_image = 0
 
-        # 남은 이미지 마지막에 추가
+        # 남은 이미지 마지막에 1장씩 추가
         while img_queue:
             result.append(GBProductTranslator._make_block("BLANK"))
-            if len(img_queue) >= 2:
-                urls = [img_queue.pop(0), img_queue.pop(0)]
-                result.append(GBProductTranslator._make_block("SPLIT_IMAGE", urls))
-            else:
-                url = img_queue.pop(0)
-                result.append(GBProductTranslator._make_block("IMAGE", [url]))
+            url = img_queue.pop(0)
+            result.append(GBProductTranslator._make_block("IMAGE", [url]))
 
         return result
 
@@ -454,13 +447,6 @@ class GBProductTranslator:
                 for url in urls:
                     if url:
                         parts.append(f'<img src="{url}" style="max-width:100%;border-radius:8px" />')
-            elif t == "SPLIT_IMAGE":
-                urls = v if isinstance(v, list) else []
-                if urls:
-                    parts.append('<div style="display:flex;gap:8px">')
-                    for url in urls:
-                        parts.append(f'<img src="{url}" style="width:49%;border-radius:8px" />')
-                    parts.append('</div>')
             elif t == "LINE":
                 parts.append('<hr />')
             elif t == "BLANK":

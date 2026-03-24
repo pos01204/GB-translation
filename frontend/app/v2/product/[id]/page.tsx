@@ -218,7 +218,7 @@ function TranslationModal({
                       미리보기
                     </label>
                     <div
-                      className="p-3 border rounded-lg text-sm bg-white prose prose-sm max-w-none"
+                      className="p-4 border rounded-lg bg-white prose prose-sm max-w-none prose-h3:text-base prose-h3:font-bold prose-h3:text-gray-900 prose-h3:mt-4 prose-h3:mb-2 prose-p:text-sm prose-p:text-gray-700 prose-p:my-1 prose-hr:my-3 prose-img:rounded-lg prose-img:my-3"
                       dangerouslySetInnerHTML={{ __html: langData.description_html }}
                     />
                   </div>
@@ -291,12 +291,7 @@ function TranslationModal({
                   </div>
                 </Section>
               )}
-              {imageTexts.length === 0 && (
-                <div className="text-center py-8 text-gray-300">
-                  <ImageIcon className="w-8 h-8 mx-auto mb-2" />
-                  <p className="text-sm">이미지 내 텍스트 없음</p>
-                </div>
-              )}
+              {/* 이미지 내 텍스트 없으면 섹션 자체 미표시 */}
             </div>
           </div>
 
