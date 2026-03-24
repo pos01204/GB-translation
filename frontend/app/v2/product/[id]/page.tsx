@@ -393,6 +393,16 @@ export default function ProductDetailPage() {
   const [translateMessage, setTranslateMessage] = useState('')
   const [translateError, setTranslateError] = useState('')
 
+  // 번역 진행 단계 카드
+  interface TranslateStep {
+    id: string
+    label: string
+    status: 'pending' | 'active' | 'done' | 'error'
+    startedAt?: number
+    elapsed?: number
+  }
+  const [translateSteps, setTranslateSteps] = useState<TranslateStep[]>([])
+
   // 등록
   const [registerLoading, setRegisterLoading] = useState(false)
   const [registerResult, setRegisterResult] = useState<{
@@ -455,58 +465,97 @@ export default function ProductDetailPage() {
     }
   }, [globalData])
 
+  // 번역 진행 단계 업데이트 헬퍼
+  const updateStep = (id: string, update: Partial<TranslateStep>) => {
+    setTranslateSteps(prev => prev.map(s =>
+      s.id === id ? { ...s, ...update } : s
+    ))
+  }
+
   // 번역 미리보기
   const handleTranslate = async () => {
     setTranslateLoading(true)
     setTranslateError('')
-    setTranslateMessage('번역 준비 중...')
+    setTranslateMessage('')
 
-    // 진행 상태 표시 타이머 (예상 단계)
-    const steps = [
-      { time: 2000, msg: 'EN 제목 + 키워드 번역 중...' },
-      { time: 12000, msg: 'JA 제목 + 키워드 번역 중...' },
-      { time: 22000, msg: 'EN 작품 설명 번역 중...' },
-      { time: 35000, msg: 'JA 작품 설명 번역 중...' },
-      { time: 48000, msg: '옵션 번역 중...' },
-      { time: 58000, msg: '번역 결과 정리 중...' },
+    // 초기 단계 설정
+    const initialSteps: TranslateStep[] = [
+      { id: 'en_title', label: 'EN 제목 + 키워드 번역', status: 'pending' },
+      { id: 'ja_title', label: 'JA 제목 + 키워드 번역', status: 'pending' },
+      { id: 'en_desc', label: 'EN 작품 설명 번역', status: 'pending' },
+      { id: 'ja_desc', label: 'JA 작품 설명 번역', status: 'pending' },
+      { id: 'options', label: '옵션 번역', status: 'pending' },
+      { id: 'ocr', label: '이미지 OCR + 텍스트 번역', status: 'pending' },
     ]
-    const timers = steps.map(({ time, msg }) =>
-      setTimeout(() => setTranslateMessage(msg), time)
-    )
+    setTranslateSteps(initialSteps)
+
+    // 타이머로 단계 진행 (예상 시간 기반)
+    const stepTimings = [
+      { id: 'en_title', activeAt: 500, doneAt: 10000 },
+      { id: 'ja_title', activeAt: 10000, doneAt: 20000 },
+      { id: 'en_desc', activeAt: 20000, doneAt: 35000 },
+      { id: 'ja_desc', activeAt: 35000, doneAt: 50000 },
+      { id: 'options', activeAt: 50000, doneAt: 65000 },
+      { id: 'ocr', activeAt: 65000, doneAt: 180000 },
+    ]
+    const timers: ReturnType<typeof setTimeout>[] = []
+    for (const { id, activeAt, doneAt } of stepTimings) {
+      timers.push(setTimeout(() => {
+        updateStep(id, { status: 'active', startedAt: Date.now() })
+      }, activeAt))
+      timers.push(setTimeout(() => {
+        updateStep(id, { status: 'done', elapsed: Math.round((doneAt - activeAt) / 1000) })
+      }, doneAt))
+    }
 
     try {
       const result = await translatePreview(productId)
       timers.forEach(clearTimeout)
       if (result.success && result.global_data) {
         setGlobalData(result.global_data)
+        // 모든 단계를 완료로 마킹
+        setTranslateSteps(prev => prev.map(s => ({
+          ...s,
+          status: 'done' as const,
+          elapsed: s.elapsed || 0,
+        })))
         setTranslateMessage('번역 완료!')
       } else {
         setTranslateError(result.message || '번역 실패')
-        setTranslateMessage('')
+        setTranslateSteps(prev => prev.map(s =>
+          s.status === 'active' || s.status === 'pending'
+            ? { ...s, status: 'error' as const }
+            : s
+        ))
       }
     } catch (err) {
       timers.forEach(clearTimeout)
       const errMsg = getErrorMessage(err)
       if (errMsg.includes('503')) {
-        setTranslateMessage('번역기 초기화 중... 15초 후 재시도합니다')
+        setTranslateSteps([{
+          id: 'init', label: '번역기 초기화 중... 15초 후 재시도', status: 'active',
+        }])
         await new Promise((resolve) => setTimeout(resolve, 15000))
+        setTranslateSteps(initialSteps)
         try {
-          setTranslateMessage('재시도 중...')
           const retryResult = await translatePreview(productId)
           if (retryResult.success && retryResult.global_data) {
             setGlobalData(retryResult.global_data)
+            setTranslateSteps(prev => prev.map(s => ({
+              ...s, status: 'done' as const, elapsed: 0,
+            })))
             setTranslateMessage('번역 완료!')
           } else {
             setTranslateError(retryResult.message || '번역 실패')
-            setTranslateMessage('')
           }
         } catch (retryErr) {
           setTranslateError(getErrorMessage(retryErr))
-          setTranslateMessage('')
         }
       } else {
         setTranslateError(errMsg)
-        setTranslateMessage('')
+        setTranslateSteps(prev => prev.map(s =>
+          s.status !== 'done' ? { ...s, status: 'error' as const } : s
+        ))
       }
     } finally {
       setTranslateLoading(false)
@@ -767,24 +816,56 @@ export default function ProductDetailPage() {
             )}
           </button>
 
-          {/* 진행 상태 메시지 */}
-          {translateMessage && !translateError && (
-            <div className={`p-3 rounded-lg border ${
-              translateMessage === '번역 완료!'
-                ? 'bg-green-50 border-green-200'
-                : 'bg-blue-50 border-blue-200'
-            }`}>
-              <p className={`text-xs flex items-start gap-1.5 ${
-                translateMessage === '번역 완료!'
-                  ? 'text-green-700'
-                  : 'text-blue-700'
-              }`}>
-                {translateMessage === '번역 완료!' ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                ) : (
-                  <Loader2 className="w-3.5 h-3.5 shrink-0 mt-0.5 animate-spin" />
-                )}
-                {translateMessage}
+          {/* 진행 단계 카드 리스트 */}
+          {translateSteps.length > 0 && (
+            <div className="space-y-0">
+              {translateSteps.map((step, i) => (
+                <div key={step.id}>
+                  <div className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-all ${
+                    step.status === 'done'
+                      ? 'bg-green-50 text-green-700'
+                      : step.status === 'active'
+                        ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                        : step.status === 'error'
+                          ? 'bg-red-50 text-red-600'
+                          : 'text-gray-400'
+                  }`}>
+                    {/* 상태 아이콘 */}
+                    {step.status === 'done' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-green-500" />
+                    ) : step.status === 'active' ? (
+                      <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-blue-500" />
+                    ) : step.status === 'error' ? (
+                      <XCircle className="w-3.5 h-3.5 shrink-0 text-red-500" />
+                    ) : (
+                      <div className="w-3.5 h-3.5 shrink-0 rounded-full border-2 border-gray-300" />
+                    )}
+                    <span className={`flex-1 ${step.status === 'active' ? 'font-medium' : ''}`}>
+                      {step.label}{step.status === 'active' ? '...' : ''}
+                    </span>
+                    {step.status === 'done' && step.elapsed !== undefined && step.elapsed > 0 && (
+                      <span className="text-[10px] text-green-500">{step.elapsed}초</span>
+                    )}
+                  </div>
+                  {/* 연결선 */}
+                  {i < translateSteps.length - 1 && (
+                    <div className="flex items-center pl-[22px] py-0.5">
+                      <div className={`w-0.5 h-3 ${
+                        step.status === 'done' ? 'bg-green-300' : 'bg-gray-200'
+                      }`} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 완료 메시지 */}
+          {translateMessage === '번역 완료!' && (
+            <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+              <p className="text-xs text-green-700 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                번역 완료!
               </p>
             </div>
           )}

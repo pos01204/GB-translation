@@ -139,15 +139,15 @@ class GBProductTranslator:
             )
             logger.info(f"옵션 번역 완료: {len(global_options)}개")
 
-        # 5. 이미지 OCR (1회만) + 언어별 번역 + 이미지 생성
+        # 5. 이미지 OCR (1회만) + 언어별 텍스트 번역 (이미지 생성은 별도)
         if domestic.detail_images:
             # OCR은 한국어 추출이므로 1회만 실행 (EN/JA 중복 제거)
             ocr_results = await self._ocr_all_images(domestic.detail_images)
             logger.info(f"이미지 OCR 완료: {len(ocr_results)}개 텍스트 발견")
 
-            # 각 언어별로 OCR 텍스트를 번역 + 이미지 생성
+            # 각 언어별로 OCR 텍스트를 번역만 (이미지 생성 없이 — 속도 우선)
             for lang in target_languages:
-                image_texts = await self._translate_and_generate_images(
+                image_texts = await self._translate_ocr_texts(
                     ocr_results, lang,
                 )
                 if lang == "en" and en_data:
@@ -155,7 +155,7 @@ class GBProductTranslator:
                 elif lang == "ja" and ja_data:
                     ja_data.image_texts = image_texts
                 logger.info(
-                    f"이미지 번역+생성 완료 ({lang}): {len(image_texts)}개"
+                    f"이미지 텍스트 번역 완료 ({lang}): {len(image_texts)}개"
                 )
 
         result = GlobalProductData(
@@ -507,107 +507,30 @@ class GBProductTranslator:
         logger.info(f"OCR 완료: {len(results)}/{len(target_images)}개 텍스트 발견")
         return results
 
-    async def _translate_and_generate_images(
+    async def _translate_ocr_texts(
         self,
         ocr_results: list[dict],
         language: str,
     ) -> list[ImageText]:
-        """OCR 결과를 번역하고 번역된 이미지를 생성"""
-        import base64
-
+        """OCR 결과의 한국어 텍스트를 대상 언어로 번역 (이미지 생성 없이)"""
         results: list[ImageText] = []
 
         for item in ocr_results:
             try:
-                # 텍스트 번역
                 translated = await self._translate_single_text(
                     item["original_text"], language,
                 )
-
-                # 번역된 이미지 생성 시도
-                translated_img_b64 = None
-                try:
-                    translated_img_b64 = await self._generate_translated_image(
-                        image_data=item["image_data"],
-                        mime=item["mime"],
-                        ocr_text=item["original_text"],
-                        translated_text=translated,
-                        language=language,
-                    )
-                except Exception as e:
-                    logger.warning(f"이미지 생성 실패 (텍스트만 사용): {e}")
-
                 results.append(ImageText(
                     image_url=item["image_url"],
                     original_text=item["original_text"],
                     translated_text=translated,
                     order_index=item["order_index"],
-                    translated_image_base64=translated_img_b64,
                 ))
-
             except Exception as e:
-                logger.warning(f"이미지 번역 실패: {e}")
+                logger.warning(f"이미지 텍스트 번역 실패: {e}")
 
         results.sort(key=lambda x: x.order_index)
         return results
-
-    async def _generate_translated_image(
-        self,
-        image_data: bytes,
-        mime: str,
-        ocr_text: str,
-        translated_text: str,
-        language: str,
-    ) -> Optional[str]:
-        """원본 이미지의 텍스트를 번역 텍스트로 교체한 새 이미지 생성 (base64)"""
-        import base64
-
-        await self.translator._wait_for_rate_limit()
-
-        from google.genai import types
-
-        lang_name = "English" if language == "en" else "Japanese"
-
-        image_part = types.Part.from_bytes(
-            data=image_data, mime_type=mime,
-        )
-
-        prompt = (
-            f"Edit this image: replace all Korean text with {lang_name} text.\n"
-            f"Korean text found: {ocr_text}\n"
-            f"{lang_name} translation: {translated_text}\n\n"
-            f"Keep the original image layout, colors, and design style exactly the same.\n"
-            f"Only replace the text — do not change any other visual elements.\n"
-            f"Match the font size and position of the original text."
-        )
-
-        try:
-            response = self.translator.client.models.generate_content(
-                model="gemini-2.0-flash-exp",
-                contents=[prompt, image_part],
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE", "TEXT"],
-                ),
-            )
-
-            # 응답에서 이미지 파트 추출
-            if response and response.candidates:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'inline_data') and part.inline_data:
-                        img_bytes = part.inline_data.data
-                        return base64.b64encode(img_bytes).decode('utf-8')
-
-            logger.info("이미지 생성 응답에 이미지 없음 (텍스트만 반환됨)")
-            return None
-
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                logger.warning("이미지 생성 rate limit")
-                await asyncio.sleep(12)
-            else:
-                logger.warning(f"이미지 생성 오류: {e}")
-            return None
 
     # ──────────────── Private: Gemini API 호출 ────────────────
 
