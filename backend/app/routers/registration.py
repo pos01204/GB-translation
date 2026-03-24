@@ -96,6 +96,7 @@ async def register_single(request: RegisterSingleRequest):
 
     try:
         global_data = request.global_data
+        domestic_data = None
 
         # global_data가 없으면 번역 파이프라인 실행
         if not global_data:
@@ -136,16 +137,26 @@ async def register_single(request: RegisterSingleRequest):
         # 국내 이미지 URL 목록 (글로벌에 복사할 이미지)
         domestic_image_urls = []
         if domestic_data and hasattr(domestic_data, 'product_images'):
-            domestic_image_urls = [
-                img.url for img in domestic_data.product_images
-                if hasattr(img, 'url') and img.url
-            ]
-        if not domestic_image_urls and domestic_data:
-            # product_images가 ProductImage 객체가 아닌 경우
-            domestic_image_urls = [
-                str(img) for img in (domestic_data.product_images or [])
-                if img
-            ]
+            for img in (domestic_data.product_images or []):
+                url = getattr(img, 'url', None) or str(img) if img else None
+                if url:
+                    domestic_image_urls.append(url)
+
+        # domestic_data가 없으면 Vuex에서 직접 가져오기
+        if not domestic_image_urls and _artist_session and _artist_session.page:
+            try:
+                vuex_images = await _artist_session.page.evaluate("""
+                    () => {
+                        const app = document.querySelector('#app');
+                        if (!app || !app.__vue__ || !app.__vue__.$store) return [];
+                        return app.__vue__.$store.state.productForm?._item?.images || [];
+                    }
+                """)
+                if vuex_images:
+                    domestic_image_urls = vuex_images
+                    logger.info(f"Vuex에서 국내 이미지 {len(vuex_images)}장 가져옴")
+            except Exception:
+                pass
 
         # 글로벌 탭 자동 입력
         writer = ProductWriter(page=_artist_session.page)
