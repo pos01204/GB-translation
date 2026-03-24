@@ -290,6 +290,17 @@ class ProductReader:
         """
         options = []
         try:
+            # 0단계: 옵션 섹션 DOM 렌더링 대기
+            try:
+                await self.page.wait_for_selector(
+                    '[class*="ProductFormOptionSection"], [class*="optionItem"]',
+                    timeout=10000,
+                )
+                logger.info("[옵션 모달] 옵션 섹션 DOM 발견")
+            except Exception:
+                logger.info("[옵션 모달] 옵션 섹션 DOM 대기 실패 (10초)")
+                return []
+
             # 1단계: JS evaluate로 옵션 버튼 텍스트 목록 추출
             option_names = await self.page.evaluate("""
                 () => {

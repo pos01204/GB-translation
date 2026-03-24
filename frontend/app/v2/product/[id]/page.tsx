@@ -228,35 +228,54 @@ export default function ProductDetailPage() {
   const handleTranslate = async () => {
     setTranslateLoading(true)
     setTranslateError('')
-    setTranslateMessage('')
+    setTranslateMessage('번역 준비 중...')
+
+    // 진행 상태 표시 타이머 (예상 단계)
+    const steps = [
+      { time: 2000, msg: 'EN 제목 + 키워드 번역 중...' },
+      { time: 12000, msg: 'JA 제목 + 키워드 번역 중...' },
+      { time: 22000, msg: 'EN 작품 설명 번역 중...' },
+      { time: 35000, msg: 'JA 작품 설명 번역 중...' },
+      { time: 48000, msg: '옵션 번역 중...' },
+      { time: 58000, msg: '번역 결과 정리 중...' },
+    ]
+    const timers = steps.map(({ time, msg }) =>
+      setTimeout(() => setTranslateMessage(msg), time)
+    )
+
     try {
       const result = await translatePreview(productId)
+      timers.forEach(clearTimeout)
       if (result.success && result.global_data) {
         setGlobalData(result.global_data)
-        setTranslateMessage(result.message || '번역 완료')
+        setTranslateMessage('번역 완료!')
       } else {
-        setTranslateError(result.message || '번역 실패: 결과를 받지 못했습니다.')
+        setTranslateError(result.message || '번역 실패')
+        setTranslateMessage('')
       }
     } catch (err) {
+      timers.forEach(clearTimeout)
       const errMsg = getErrorMessage(err)
-      // 503 에러 시 5초 후 1회 자동 재시도
       if (errMsg.includes('503')) {
-        setTranslateMessage('번역기 초기화 중... 잠시 후 재시도합니다')
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        setTranslateMessage('')
+        setTranslateMessage('번역기 초기화 중... 15초 후 재시도합니다')
+        await new Promise((resolve) => setTimeout(resolve, 15000))
         try {
+          setTranslateMessage('재시도 중...')
           const retryResult = await translatePreview(productId)
           if (retryResult.success && retryResult.global_data) {
             setGlobalData(retryResult.global_data)
-            setTranslateMessage(retryResult.message || '번역 완료')
+            setTranslateMessage('번역 완료!')
           } else {
-            setTranslateError(retryResult.message || '번역 실패: 결과를 받지 못했습니다.')
+            setTranslateError(retryResult.message || '번역 실패')
+            setTranslateMessage('')
           }
         } catch (retryErr) {
           setTranslateError(getErrorMessage(retryErr))
+          setTranslateMessage('')
         }
       } else {
         setTranslateError(errMsg)
+        setTranslateMessage('')
       }
     } finally {
       setTranslateLoading(false)
