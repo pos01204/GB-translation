@@ -88,28 +88,80 @@ class ProductWriter:
         4. "이미지 추가" 버튼 클릭
         """
         try:
-            # STEP 1: '+' 버튼 클릭 (이미지 추가 영역)
-            # 이미지 섹션 내의 추가 버튼 찾기
+            # STEP 1: 이미지 추가 영역 클릭
+            # 스크린샷: 회색 빈 사각형 안에 '+' 표시 — div 또는 label 클릭
             plus_selectors = [
-                '.GlobalProductForm__imageAddButton',
+                '[class*="ImageUpload"] [class*="add"]',
+                '[class*="imageUpload"] [class*="add"]',
+                '[class*="image-upload"] [class*="add"]',
+                '[class*="ImageAdd"]',
                 '[class*="imageAdd"]',
-                '[class*="image"] button:has-text("+")',
-                'button:has-text("+")',
+                'label[for*="image"]',
+                '[class*="upload"] [class*="plus"]',
             ]
             plus_clicked = False
             for sel in plus_selectors:
                 btn = self.page.locator(sel).first
                 try:
-                    if await asyncio.wait_for(btn.count(), timeout=3) > 0:
+                    if await asyncio.wait_for(btn.count(), timeout=2) > 0:
                         await btn.click()
                         plus_clicked = True
-                        logger.info(f"이미지 '+' 버튼 클릭 (셀렉터: {sel})")
+                        logger.info(f"이미지 추가 영역 클릭 (셀렉터: {sel})")
                         break
                 except (asyncio.TimeoutError, Exception):
                     continue
 
+            # 폴백: JS로 이미지 추가 영역 찾기
             if not plus_clicked:
-                logger.warning("이미지 '+' 버튼을 찾을 수 없습니다")
+                try:
+                    clicked = await self.page.evaluate("""
+                        () => {
+                            // 이미지 섹션 내의 추가 버튼/영역 찾기
+                            const candidates = document.querySelectorAll(
+                                '[class*="image"] [class*="add"], ' +
+                                '[class*="Image"] [class*="Add"], ' +
+                                '[class*="upload"], [class*="Upload"]'
+                            );
+                            for (const el of candidates) {
+                                const text = el.textContent?.trim();
+                                if (text === '+' || text === '' || el.querySelector('svg, i')) {
+                                    el.click();
+                                    return true;
+                                }
+                            }
+                            // 더 넓은 탐색: "작품 이미지" 근처의 클릭 가능 영역
+                            const imageSection = document.querySelector('[class*="작품 이미지"], [class*="image"]');
+                            if (imageSection) {
+                                const addBtn = imageSection.querySelector('[class*="add"], [class*="plus"], button');
+                                if (addBtn) { addBtn.click(); return true; }
+                            }
+                            return false;
+                        }
+                    """)
+                    if clicked:
+                        plus_clicked = True
+                        logger.info("이미지 추가 영역 클릭 (JS 폴백)")
+                except Exception:
+                    pass
+
+            if not plus_clicked:
+                logger.warning("이미지 추가 영역을 찾을 수 없습니다 — 디버그 필요")
+                # 디버그: 이미지 관련 요소 덤프
+                try:
+                    debug = await self.page.evaluate("""
+                        () => {
+                            const els = document.querySelectorAll('[class*="image"], [class*="Image"], [class*="upload"], [class*="Upload"]');
+                            return Array.from(els).slice(0, 10).map(el => ({
+                                tag: el.tagName,
+                                classes: (el.className || '').substring(0, 100),
+                                text: el.textContent?.trim().substring(0, 30),
+                                children: el.children.length,
+                            }));
+                        }
+                    """)
+                    logger.info(f"이미지 관련 요소: {debug}")
+                except Exception:
+                    pass
                 return False
 
             await asyncio.sleep(1.5)
@@ -236,9 +288,10 @@ class ProductWriter:
         try:
             # 키워드 섹션 클릭 (모달/패널 열기)
             kw_section = self.page.locator(
-                '[class*="contentItem"]:has-text("작품 키워드"), '
-                'text=작품 키워드'
+                '[class*="contentItem"]:has-text("작품 키워드")'
             ).first
+            if await kw_section.count() == 0:
+                kw_section = self.page.locator('text="작품 키워드"').first
             if await kw_section.count() > 0:
                 await kw_section.click()
                 await asyncio.sleep(1.5)
@@ -411,8 +464,9 @@ class ProductWriter:
             logger.error(f"판매 등록 실패: {e}")
             return False
 
-    async def _check_save_result(self, lang_text: str, action: str):
-        """저장/등록 후 에러 모달 또는 성공 상태 확인"""
+    async def _check_save_result(self, lang_text: str, action: str) -> bool:
+        """저장/등록 후 에러 모달 또는 성공 상태 확인. 실패 시 False 반환."""
+        success = True
         try:
             # 에러 다이얼로그 확인
             error_dialog = self.page.locator('.v-dialog--active').first
@@ -420,8 +474,8 @@ class ProductWriter:
                 if await asyncio.wait_for(error_dialog.count(), timeout=2) > 0:
                     error_text = await error_dialog.inner_text()
                     if error_text and len(error_text) < 500:
-                        logger.warning(f"[{action}] 다이얼로그 감지: {error_text[:200]}")
-                    # 확인 버튼 클릭하여 닫기
+                        logger.error(f"[{action}] 에러 다이얼로그: {error_text[:200]}")
+                        success = False
                     ok_btn = error_dialog.locator('button:has-text("확인")').first
                     if await ok_btn.count() > 0:
                         await ok_btn.click()
@@ -434,13 +488,22 @@ class ProductWriter:
             try:
                 if await asyncio.wait_for(snackbar.count(), timeout=1) > 0:
                     msg = await snackbar.inner_text()
-                    logger.info(f"[{action}] 스낵바: {msg[:100]}")
+                    if "확인" in msg or "입력" in msg or "오류" in msg or "실패" in msg:
+                        logger.error(f"[{action}] 에러 스낵바: {msg[:100]}")
+                        success = False
+                    else:
+                        logger.info(f"[{action}] 스낵바: {msg[:100]}")
             except asyncio.TimeoutError:
                 pass
 
-            logger.info(f"{lang_text} {action} 완료")
+            if success:
+                logger.info(f"{lang_text} {action} 성공")
+            else:
+                logger.error(f"{lang_text} {action} 실패 — 필수 입력 정보 확인 필요")
         except Exception as e:
             logger.warning(f"저장 결과 확인 실패 (무시): {e}")
+
+        return success
 
     # ──────────────── 통합 메서드 ────────────────
 

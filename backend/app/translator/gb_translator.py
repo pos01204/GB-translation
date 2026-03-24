@@ -224,40 +224,7 @@ class GBProductTranslator:
             else GB_KEYWORD_PROMPT_JA
         )
 
-        combined_prompt = (
-            f"다음 두 가지를 번역해주세요. 반드시 ---구분선--- 으로 구분하여 응답하세요.\n\n"
-            f"[파트1: 제목 번역]\n"
-            f"{title_prompt.format(text=title)}\n\n"
-            f"---구분선---\n\n"
-            f"[파트2: 키워드 번역]\n"
-            f"{keyword_prompt.format(text=chr(10).join(keywords))}"
-        )
-
-        result = await self._call_llm(combined_prompt, max_tokens=4000)
-
-        if result and "---" in result:
-            parts = result.split("---")
-            # 구분선 전후로 분리
-            title_part = parts[0].strip().strip('"').strip("'").strip()
-            keyword_part = parts[-1].strip() if len(parts) > 1 else ""
-
-            # 제목: 첫 줄 or 전체 (짧은 텍스트)
-            translated_title = title_part.split("\n")[0].strip().strip('"').strip("'")
-            if not translated_title:
-                translated_title = title
-
-            # 키워드: 줄바꿈 구분
-            translated_keywords = [
-                kw.strip() for kw in keyword_part.split("\n")
-                if kw.strip()
-            ] if keyword_part else keywords
-
-            if translated_keywords and len(translated_keywords) <= len(keywords) * 2:
-                return translated_title, translated_keywords
-            return translated_title, keywords
-
-        # 합쳐서 번역 실패 시 개별 호출 폴백
-        logger.warning(f"합친 번역 실패, 개별 호출로 폴백 ({language})")
+        # 개별 호출 (합쳐서 번역 시 레이블이 응답에 포함되는 문제 방지)
         translated_title = await self._translate_title(title, language)
         translated_keywords = await self._translate_keywords(keywords, language)
         return translated_title, translated_keywords
