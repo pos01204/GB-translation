@@ -216,6 +216,78 @@ async def debug_product_page(product_id: str = ""):
                     active: t.classList.contains('v-tab--active') || t.getAttribute('aria-selected') === 'true',
                 }));
 
+                // 배경 이미지 URL 수집
+                const bgImages = [];
+                const allEls = document.querySelectorAll('*');
+                for (const el of allEls) {
+                    const style = window.getComputedStyle(el);
+                    const bg = style.backgroundImage;
+                    if (bg && bg !== 'none' && bg.includes('url(')) {
+                        const match = bg.match(/url\(['"]?(https?:\/\/[^'")\s]+)/);
+                        if (match) {
+                            bgImages.push({
+                                url: match[1].substring(0, 200),
+                                size: `${el.offsetWidth}x${el.offsetHeight}`,
+                                tag: el.tagName,
+                                classes: (el.className || '').toString().substring(0, 80),
+                            });
+                        }
+                    }
+                }
+
+                // Vue 인스턴스 데이터 탐색
+                let vueData = null;
+                const appEl = document.querySelector('#app') || document.querySelector('[id*="app"]') || document.querySelector('.v-application');
+                if (appEl) {
+                    // Vue 2
+                    let el = appEl;
+                    for (let i = 0; i < 15; i++) {
+                        if (el.__vue__) {
+                            const d = el.__vue__.$data || el.__vue__;
+                            vueData = {};
+                            for (const [k, v] of Object.entries(d)) {
+                                if (typeof v === 'function') continue;
+                                try {
+                                    vueData[k] = JSON.stringify(v)?.substring(0, 300);
+                                } catch(e) {
+                                    vueData[k] = String(v).substring(0, 100);
+                                }
+                            }
+                            break;
+                        }
+                        if (el.firstElementChild) el = el.firstElementChild;
+                        else break;
+                    }
+                }
+
+                // product_option hidden input의 원본 JS 값 접근 시도
+                let optionRaw = null;
+                const optInput = document.querySelector('input[name="product_option"]');
+                if (optInput) {
+                    // Vue binding에서 실제 값 접근
+                    let parent = optInput;
+                    for (let i = 0; i < 10; i++) {
+                        parent = parent.parentElement;
+                        if (!parent) break;
+                        if (parent.__vue__) {
+                            const vm = parent.__vue__;
+                            const data = vm.$data || vm;
+                            // 옵션 관련 키 탐색
+                            for (const key of Object.keys(data)) {
+                                if (key.toLowerCase().includes('option')) {
+                                    try {
+                                        optionRaw = { key, value: JSON.stringify(data[key])?.substring(0, 500) };
+                                    } catch(e) {
+                                        optionRaw = { key, value: String(data[key]).substring(0, 200) };
+                                    }
+                                    break;
+                                }
+                            }
+                            if (optionRaw) break;
+                        }
+                    }
+                }
+
                 return {
                     url: window.location.href,
                     title: document.title,
@@ -225,7 +297,12 @@ async def debug_product_page(product_id: str = ""):
                     buttons: buttons,
                     imageCount: images.length,
                     images: images,
+                    bgImageCount: bgImages.length,
+                    bgImages: bgImages.slice(0, 20),
                     tabs: tabs,
+                    vueDataKeys: vueData ? Object.keys(vueData) : null,
+                    vueDataSample: vueData,
+                    optionRawFromVue: optionRaw,
                 };
             }
         """)
