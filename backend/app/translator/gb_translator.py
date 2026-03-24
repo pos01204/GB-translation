@@ -388,42 +388,56 @@ class GBProductTranslator:
         text_blocks: list[dict],
         available_images: list[str],
     ) -> list[dict]:
-        """텍스트 블록 사이에 IMAGE(1장) 블록을 적절히 삽입
+        """텍스트 블록 사이에 이미지를 균등 배치
 
-        에디터에서 SPLIT_IMAGE(2장 나란히)는 미지원 → IMAGE만 사용.
+        전략: 이미지를 텍스트 섹션 사이에 균등하게 분산.
+        SUBJECT를 기준으로 섹션을 나누고, 각 섹션 뒤에 이미지 배치.
         """
         if not available_images:
             return text_blocks
 
-        result = []
-        img_queue = list(available_images)
-        text_count_since_image = 0
-        subject_count = 0
+        # 1. 텍스트 블록을 SUBJECT 기준으로 섹션 분리
+        sections: list[list[dict]] = []
+        current_section: list[dict] = []
 
         for block in text_blocks:
-            # SUBJECT 전에 구분선 삽입 (첫 번째 제외)
-            if block["type"] == "SUBJECT" and subject_count > 0:
+            if block["type"] == "SUBJECT" and current_section:
+                sections.append(current_section)
+                current_section = []
+            current_section.append(block)
+        if current_section:
+            sections.append(current_section)
+
+        # 2. 이미지를 섹션 수에 맞게 분배
+        img_queue = list(available_images)
+        num_sections = len(sections)
+        if num_sections == 0:
+            return text_blocks
+
+        # 각 섹션에 할당할 이미지 수 계산 (균등 분배)
+        imgs_per_section = max(1, len(img_queue) // num_sections)
+
+        # 3. 각 섹션 뒤에 이미지 삽입
+        result = []
+        for i, section in enumerate(sections):
+            # 첫 섹션이 아니면 구분선
+            if i > 0:
                 result.append(GBProductTranslator._make_block("BLANK"))
                 result.append(GBProductTranslator._make_block("LINE"))
                 result.append(GBProductTranslator._make_block("BLANK"))
 
-            result.append(block)
+            # 섹션의 텍스트 블록들 추가
+            result.extend(section)
 
-            if block["type"] == "SUBJECT":
-                subject_count += 1
-                text_count_since_image = 0
-            elif block["type"] == "TEXT":
-                text_count_since_image += 1
+            # 이 섹션에 할당된 이미지 삽입
+            for _ in range(imgs_per_section):
+                if not img_queue:
+                    break
+                result.append(GBProductTranslator._make_block("BLANK"))
+                url = img_queue.pop(0)
+                result.append(GBProductTranslator._make_block("IMAGE", [url]))
 
-                # TEXT 1-2개 후에 이미지 1장 삽입
-                if text_count_since_image >= 2 and img_queue:
-                    result.append(GBProductTranslator._make_block("BLANK"))
-                    url = img_queue.pop(0)
-                    result.append(GBProductTranslator._make_block("IMAGE", [url]))
-                    result.append(GBProductTranslator._make_block("BLANK"))
-                    text_count_since_image = 0
-
-        # 남은 이미지 마지막에 1장씩 추가
+        # 4. 남은 이미지 마지막에 추가
         while img_queue:
             result.append(GBProductTranslator._make_block("BLANK"))
             url = img_queue.pop(0)
