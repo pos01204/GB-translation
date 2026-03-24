@@ -730,6 +730,12 @@ async def debug_global_elements():
         except Exception:
             pass
 
+        # 스크롤하여 lazy 렌더링 요소 로드
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(2)
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(1)
+
         result = await page.evaluate("""
             () => {
                 const output = { url: window.location.href };
@@ -801,6 +807,33 @@ async def debug_global_elements():
                             tag: el.tagName,
                             text: el.textContent?.trim(),
                             classes: (el.className || '').substring(0, 80),
+                        });
+                    }
+                }
+
+                // 5. 페이지 전체 텍스트에서 "이미지" "키워드" 포함 부분 추출
+                output.textWithImage = [];
+                output.textWithKeyword = [];
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                while (walker.nextNode()) {
+                    const text = walker.currentNode.textContent.trim();
+                    if (!text) continue;
+                    const parent = walker.currentNode.parentElement;
+                    if (!parent || parent.offsetHeight === 0) continue;
+                    if (text.includes('이미지') && text.length < 100) {
+                        output.textWithImage.push({
+                            text: text,
+                            parentTag: parent.tagName,
+                            parentClasses: (parent.className || '').substring(0, 100),
+                            grandparentClasses: (parent.parentElement?.className || '').substring(0, 100),
+                        });
+                    }
+                    if (text.includes('키워드') && text.length < 100) {
+                        output.textWithKeyword.push({
+                            text: text,
+                            parentTag: parent.tagName,
+                            parentClasses: (parent.className || '').substring(0, 100),
+                            grandparentClasses: (parent.parentElement?.className || '').substring(0, 100),
                         });
                     }
                 }
