@@ -14,7 +14,7 @@ from typing import Optional
 from google import genai
 from google.genai import types
 
-from .models import (
+from ..models.v1 import (
     ProductData,
     ProductOption,
     ImageText,
@@ -23,7 +23,7 @@ from .models import (
 )
 
 # 전문 번역 프롬프트 템플릿
-from .prompts import (
+from ..prompts import (
     JAPANESE_PROMPT,
     JAPANESE_TITLE_PROMPT,
     JAPANESE_OPTION_PROMPT,
@@ -183,20 +183,15 @@ class ProductTranslator:
         print(f"{'='*50}")
         
         if not self._initialized or not self.client:
-            if self.api_key and not self._initialized:
-                print("🔄 번역기 재초기화 시도...")
-                self._initialize_client(self.api_key)
-            
-            if not self._initialized or not self.client:
-                print("⚠️ 모델 미초기화 - 원본 데이터 반환")
-                return TranslatedProduct(
-                    original=product_data,
-                    translated_title=product_data.title,
-                    translated_description=product_data.description,
-                    translated_options=product_data.options,
-                    translated_image_texts=[],
-                    target_language=target_language
-                )
+            print("⚠️ 모델 미초기화 - 원본 데이터 반환")
+            return TranslatedProduct(
+                original=product_data,
+                translated_title=product_data.title,
+                translated_description=product_data.description,
+                translated_options=product_data.options,
+                translated_image_texts=[],
+                target_language=target_language
+            )
         
         # 1. 제목 번역 (간결한 프롬프트 사용)
         print(f"📝 제목 번역: {product_data.title[:30]}...")

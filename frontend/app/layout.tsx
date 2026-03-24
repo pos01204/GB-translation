@@ -30,13 +30,25 @@ export default function RootLayout({
                 </span>
               </div>
               <nav className="flex items-center gap-4 text-sm">
-                <a 
-                  href="https://www.idus.com" 
-                  target="_blank" 
+                <a
+                  href="/"
+                  className="text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  v1 번역
+                </a>
+                <a
+                  href="/v2"
+                  className="text-orange-600 hover:text-orange-700 font-medium transition-colors"
+                >
+                  v2 글로벌 등록
+                </a>
+                <a
+                  href="https://www.idus.com"
+                  target="_blank"
                   rel="noopener noreferrer"
                   className="text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  아이디어스 바로가기 ↗
+                  아이디어스 ↗
                 </a>
               </nav>
             </div>

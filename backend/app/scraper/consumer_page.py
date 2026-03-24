@@ -10,7 +10,7 @@ from typing import Optional
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext, Response
 from playwright_stealth import stealth_async
 
-from .models import ProductData, ProductOption
+from ..models.v1 import ProductData, ProductOption
 
 
 class IdusScraper:
@@ -79,51 +79,13 @@ class IdusScraper:
         self._initialized = False
         print("✅ Playwright 브라우저 종료 완료")
     
-    async def _ensure_browser_alive(self):
-        """브라우저가 살아있는지 확인하고, 죽었으면 재시작"""
+    async def scrape_product(self, url: str) -> ProductData:
         if not self._initialized:
             await self.initialize()
-            return
-        
-        try:
-            if self.context:
-                pages = self.context.pages
-                _ = len(pages)
-            else:
-                raise Exception("context is None")
-        except Exception:
-            print("🔄 브라우저가 비정상 — 재시작 중...")
-            self._initialized = False
-            try:
-                if self.context:
-                    await self.context.close()
-            except: pass
-            try:
-                if self.browser:
-                    await self.browser.close()
-            except: pass
-            try:
-                if self.playwright:
-                    await self.playwright.stop()
-            except: pass
-            self.context = None
-            self.browser = None
-            self.playwright = None
-            await self.initialize()
-
-    async def scrape_product(self, url: str) -> ProductData:
-        await self._ensure_browser_alive()
         
         print(f"📄 크롤링 시작: {url}")
         
-        try:
-            page = await self.context.new_page()
-        except Exception as e:
-            print(f"⚠️ 페이지 생성 실패, 브라우저 재시작: {e}")
-            self._initialized = False
-            await self._ensure_browser_alive()
-            page = await self.context.new_page()
-        
+        page = await self.context.new_page()
         await stealth_async(page)
         
         # 네트워크에서 이미지 URL 수집
