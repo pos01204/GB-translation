@@ -45,13 +45,14 @@ class ProductReader:
             logger.info(f"[Vuex] 데이터 추출 성공: {product_id}")
             product = self._build_product_from_vuex(product_id, vuex_data)
 
-            # 국내 옵션이 비어있으면 DOM 모달에서 추출 시도
-            if not product.options:
-                logger.info("[Vuex] 옵션 비어있음 — DOM 모달에서 추출 시도")
-                dom_options = await self._read_options_from_modal()
-                if dom_options:
-                    product.options = dom_options
-                    logger.info(f"[DOM 모달] 옵션 {len(dom_options)}개 추출")
+            # 국내 옵션은 항상 DOM 모달에서 추출
+            # (Vuex productForm._item.options는 항상 빈 배열,
+            #  globalProduct 옵션은 일본어만 있어 국내 데이터로 부적합)
+            logger.info("[옵션] DOM 모달에서 국내 옵션 추출 시도")
+            dom_options = await self._read_options_from_modal()
+            if dom_options:
+                product.options = dom_options
+                logger.info(f"[옵션] DOM 모달 성공: {len(dom_options)}개")
 
             return product
 
@@ -103,30 +104,8 @@ class ProductReader:
                         }
                     }
 
-                    // 글로벌 옵션 (globalProduct._detail.productOptionGroups) — 국내 없으면 참조
-                    const globalOpts = state.globalProduct?._detail?.productOptionGroups || [];
-                    if (options.length === 0 && Array.isArray(globalOpts) && globalOpts.length > 0) {
-                        for (const group of globalOpts) {
-                            if (!group) continue;
-                            // 그룹명: value는 [{lang, value}] 다국어 배열
-                            const nameArr = group.value || [];
-                            const name = Array.isArray(nameArr)
-                                ? (nameArr.find(x => x.lang === 'ko')?.value || nameArr.find(x => x.lang === 'ja')?.value || nameArr[0]?.value || '')
-                                : String(nameArr);
-                            const vals = group.productOptions || [];
-                            const values = [];
-                            for (const opt of (Array.isArray(vals) ? vals : [])) {
-                                const vArr = opt.value || [];
-                                const v = Array.isArray(vArr)
-                                    ? (vArr.find(x => x.lang === 'ko')?.value || vArr.find(x => x.lang === 'ja')?.value || vArr[0]?.value || '')
-                                    : String(vArr);
-                                values.push({ value: v, additional_price: opt.price || 0 });
-                            }
-                            if (name || values.length > 0) {
-                                options.push({ name: String(name), values, option_type: group.optionType || 'basic' });
-                            }
-                        }
-                    }
+                    // 글로벌 옵션은 국내 데이터로 부적합 (일본어만)
+                    // → 국내 옵션은 DOM 모달에서 별도 추출
 
                     // premiumDescription: [{uuid, type, label, value}, ...]
                     // value는 TEXT/SUBJECT일 때 문자열, IMAGE/SPLIT_IMAGE일 때 URL 배열
