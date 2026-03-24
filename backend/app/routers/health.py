@@ -698,6 +698,123 @@ async def debug_option_modal():
         return {"success": False, "error": str(e)}
 
 
+@router.get("/api/debug/global-elements", summary="글로벌 페이지 이미지/키워드/옵션 요소 탐색")
+async def debug_global_elements():
+    """글로벌 페이지에서 이미지 추가 버튼, 키워드 섹션, 옵션 편집 버튼의 DOM을 덤프"""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    try:
+        page = _artist_session.page
+
+        # 글로벌 페이지인지 확인, 아니면 이동
+        if "/global" not in page.url:
+            import re
+            m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+            if m:
+                url = f"https://artist.idus.com/product/{m.group(1)}/global"
+                try:
+                    await page.goto(url, timeout=30000)
+                    await page.wait_for_load_state("domcontentloaded")
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+
+        # 충분히 대기
+        try:
+            await page.wait_for_selector('textarea[name="globalProductName"]', timeout=10000)
+        except Exception:
+            pass
+
+        result = await page.evaluate("""
+            () => {
+                const output = { url: window.location.href };
+
+                // 1. 이미지 영역: '+' 요소 탐색
+                output.imageSection = [];
+                // 이미지 관련 텍스트 "작품 이미지" 근처 요소
+                const allEls = document.querySelectorAll('*');
+                for (const el of allEls) {
+                    const text = el.textContent?.trim();
+                    // '+' 만 가진 요소 (작은 요소)
+                    if (text === '+' && el.children.length <= 2 && el.offsetHeight > 0) {
+                        output.imageSection.push({
+                            found: '+',
+                            tag: el.tagName,
+                            classes: (el.className || '').substring(0, 120),
+                            parent: el.parentElement?.tagName + '.' + (el.parentElement?.className || '').substring(0, 80),
+                            size: el.offsetWidth + 'x' + el.offsetHeight,
+                            clickable: el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'LABEL' || el.getAttribute('role') === 'button',
+                        });
+                    }
+                }
+
+                // 2. 키워드 섹션
+                output.keywordSection = [];
+                const kwEls = document.querySelectorAll('[class*="contentItem"], [class*="ContentItem"]');
+                for (const el of kwEls) {
+                    output.keywordSection.push({
+                        tag: el.tagName,
+                        classes: (el.className || '').substring(0, 120),
+                        text: el.textContent?.trim().substring(0, 60),
+                        visible: el.offsetHeight > 0,
+                    });
+                }
+                // 키워드 텍스트를 직접 찾기
+                const kwTextEls = document.querySelectorAll('*');
+                for (const el of kwTextEls) {
+                    if (el.textContent?.trim() === '작품 키워드' && el.children.length === 0) {
+                        output.keywordSection.push({
+                            exactMatch: true,
+                            tag: el.tagName,
+                            classes: (el.className || '').substring(0, 120),
+                            parent: el.parentElement?.tagName + '.' + (el.parentElement?.className || '').substring(0, 80),
+                        });
+                    }
+                }
+
+                // 3. 옵션 편집
+                output.optionSection = [];
+                const optBtns = document.querySelectorAll('button, a, [role="button"]');
+                for (const el of optBtns) {
+                    const text = el.textContent?.trim();
+                    if (text && (text.includes('옵션') || text.includes('키워드'))) {
+                        output.optionSection.push({
+                            tag: el.tagName,
+                            text: text.substring(0, 60),
+                            classes: (el.className || '').substring(0, 120),
+                            visible: el.offsetHeight > 0,
+                        });
+                    }
+                }
+
+                // 4. 페이지 내 모든 가시적 텍스트 (섹션 헤딩)
+                output.visibleHeadings = [];
+                const headings = document.querySelectorAll('h1, h2, h3, h4, .subtitle-1, .subtitle-2, .body-1, .body-2, [class*="title"], [class*="Title"]');
+                for (const el of headings) {
+                    if (el.offsetHeight > 0 && el.textContent?.trim().length < 60) {
+                        output.visibleHeadings.push({
+                            tag: el.tagName,
+                            text: el.textContent?.trim(),
+                            classes: (el.className || '').substring(0, 80),
+                        });
+                    }
+                }
+
+                return output;
+            }
+        """)
+
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @router.get("/api/debug/test-option-reader", summary="ProductReader 옵션 코드 직접 테스트")
 async def debug_test_option_reader():
     """ProductReader._read_options_from_modal()과 동일한 코드를 실행하여 결과 확인"""
