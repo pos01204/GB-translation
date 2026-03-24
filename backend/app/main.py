@@ -112,6 +112,7 @@ async def lifespan(app: FastAPI):
 
     # 라우터에 의존성 주입
     v1.configure(scraper, translator, initialize_v1_services)
+    health.configure(artist_session)
     session.configure(artist_session)
     products.configure(artist_session)
     translation.configure(artist_session, gb_translator)
