@@ -510,9 +510,9 @@ async def debug_vuex_product():
         return {"success": False, "error": str(e)}
 
 
-@router.get("/api/debug/global-editor", summary="글로벌 탭 에디터 구조 확인")
+@router.get("/api/debug/global-editor", summary="글로벌 탭 DOM 전체 덤프")
 async def debug_global_editor(product_id: str = ""):
-    """글로벌 탭의 Vuex 상태 + 에디터 DOM 구조를 확인합니다."""
+    """글로벌 페이지(/global)로 직접 이동 → 모든 버튼/탭/input 덤프"""
     import asyncio
 
     if not _artist_session or not _artist_session.page:
@@ -523,84 +523,70 @@ async def debug_global_editor(product_id: str = ""):
     try:
         page = _artist_session.page
 
-        # 1. 글로벌 탭으로 전환
-        global_tab = page.locator('button:has-text("글로벌"), [role="tab"]:has-text("글로벌")').first
-        if await global_tab.count() > 0:
-            await global_tab.click()
-            await asyncio.sleep(2)
+        # 1. /global URL로 직접 이동
+        if product_id:
+            url = f"https://artist.idus.com/product/{product_id}/global"
+        else:
+            # 현재 URL에서 product_id 추출
+            current = page.url
+            import re
+            m = re.search(r'/product/([a-f0-9-]{36})', current)
+            if m:
+                url = f"https://artist.idus.com/product/{m.group(1)}/global"
+            else:
+                return {"error": "product_id를 찾을 수 없습니다"}
 
-        # 2. Vuex에서 globalProduct 상태 덤프
-        vuex_data = await page.evaluate("""
+        try:
+            await page.goto(url, timeout=30000)
+            await page.wait_for_load_state("domcontentloaded")
+        except Exception as e:
+            logger.warning(f"글로벌 페이지 이동 오류 (계속): {e}")
+        await asyncio.sleep(3)
+
+        # 2. 전체 DOM 덤프: 버튼, 탭, input, textarea
+        dom_info = await page.evaluate("""
             () => {
-                const app = document.querySelector('#app');
-                if (!app || !app.__vue__ || !app.__vue__.$store) return { error: 'no store' };
-                const store = app.__vue__.$store;
-                const gp = store.state.globalProduct || {};
-                const detail = gp._detail || {};
+                const result = { url: window.location.href };
 
-                return {
-                    detailKeys: Object.keys(detail),
-                    hasPremiumDescription: 'premiumDescription' in detail,
-                    hasLanguageContents: 'languageContents' in detail,
-                    languageContents: detail.languageContents
-                        ? JSON.stringify(detail.languageContents).substring(0, 2000)
-                        : null,
-                    premiumDescription: detail.premiumDescription
-                        ? JSON.stringify(detail.premiumDescription).substring(0, 2000)
-                        : null,
-                    // 각 언어별 내용 확인
-                    detailUI: gp._detailUI
-                        ? JSON.stringify(gp._detailUI).substring(0, 1000)
-                        : null,
-                    detailUIKeys: gp._detailUI ? Object.keys(gp._detailUI) : null,
-                };
+                // 모든 버튼
+                result.buttons = Array.from(document.querySelectorAll('button')).map(b => ({
+                    text: b.textContent?.trim().substring(0, 80),
+                    tag: b.tagName,
+                    classes: (b.className || '').substring(0, 100),
+                    disabled: b.disabled,
+                    visible: b.offsetHeight > 0,
+                })).filter(b => b.visible && b.text);
+
+                // 모든 탭 (role="tab" 또는 탭 관련 클래스)
+                result.tabs = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"], [class*="Tab"]')).map(t => ({
+                    text: t.textContent?.trim().substring(0, 80),
+                    tag: t.tagName,
+                    classes: (t.className || '').substring(0, 100),
+                    active: t.getAttribute('aria-selected') === 'true' || t.classList.contains('v-tab--active'),
+                })).filter(t => t.text);
+
+                // 모든 input/textarea
+                result.inputs = Array.from(document.querySelectorAll('input, textarea')).map(i => ({
+                    tag: i.tagName,
+                    type: i.type || 'textarea',
+                    name: i.name,
+                    placeholder: i.placeholder?.substring(0, 80),
+                    value: i.value?.substring(0, 80),
+                    visible: i.offsetHeight > 0,
+                })).filter(i => i.visible || i.name);
+
+                // 링크 (a 태그 중 탭 관련)
+                result.links = Array.from(document.querySelectorAll('a')).map(a => ({
+                    text: a.textContent?.trim().substring(0, 80),
+                    href: a.href?.substring(0, 100),
+                    classes: (a.className || '').substring(0, 100),
+                })).filter(a => a.text && (a.text.includes('일본어') || a.text.includes('영어') || a.text.includes('글로벌') || a.text.includes('저장') || a.text.includes('판매')));
+
+                return result;
             }
         """)
 
-        # 3. "수정하기" 버튼 클릭 가능 여부
-        edit_btn = page.locator('button:has-text("수정하기")').first
-        has_edit_btn = await edit_btn.count() > 0
-
-        # 4. 에디터 영역 확인
-        editor_info = await page.evaluate("""
-            () => {
-                const editors = [];
-                // contenteditable
-                for (const el of document.querySelectorAll('[contenteditable="true"]')) {
-                    editors.push({
-                        type: 'contenteditable',
-                        tag: el.tagName,
-                        classes: (el.className || '').substring(0, 100),
-                        htmlLength: el.innerHTML?.length || 0,
-                        textPreview: el.textContent?.substring(0, 100),
-                    });
-                }
-                // Quill/ProseMirror/TipTap
-                for (const sel of ['.ql-editor', '.ProseMirror', '.tiptap']) {
-                    for (const el of document.querySelectorAll(sel)) {
-                        editors.push({
-                            type: sel,
-                            tag: el.tagName,
-                            htmlLength: el.innerHTML?.length || 0,
-                        });
-                    }
-                }
-                return editors;
-            }
-        """)
-
-        # 5. 국내 탭으로 복원
-        domestic_tab = page.locator('button:has-text("국내"), [role="tab"]:has-text("국내")').first
-        if await domestic_tab.count() > 0:
-            await domestic_tab.click()
-            await asyncio.sleep(1)
-
-        return {
-            "success": True,
-            "vuex": vuex_data,
-            "hasEditButton": has_edit_btn,
-            "editors": editor_info,
-        }
+        return {"success": True, "data": dom_info}
 
     except Exception as e:
         logger.error(f"글로벌 에디터 디버그 실패: {e}")
