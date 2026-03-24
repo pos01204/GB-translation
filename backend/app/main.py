@@ -53,21 +53,24 @@ async def initialize_v1_services():
     from .scraper import IdusScraper as _IdusScraper
     from .translator import ProductTranslator as _ProductTranslator
 
-    # Gemini API 키 확인
-    gemini_api_key = os.getenv("GEMINI_API_KEY") or settings.gemini_api_key
-    if not gemini_api_key:
-        logger.warning("GEMINI_API_KEY 환경변수가 설정되지 않았습니다!")
-    else:
-        masked_key = gemini_api_key[:8] + "..." + gemini_api_key[-4:] if len(gemini_api_key) > 12 else "***"
-        logger.info(f"Gemini API 키 확인됨: {masked_key}")
+    # Claude API 키 확인 (우선)
+    claude_api_key = os.getenv("CLAUDE_API_KEY") or settings.claude_api_key
 
-    # Translator 초기화
-    logger.info("Translator 초기화...")
-    translator = _ProductTranslator(api_key=gemini_api_key)
-    if translator._initialized:
-        logger.info(f"Translator 초기화 성공 (모델: {translator._model_name})")
+    # Gemini는 Claude 없을 때만 초기화 (시간 절약)
+    translator = None
+    if not claude_api_key:
+        gemini_api_key = os.getenv("GEMINI_API_KEY") or settings.gemini_api_key
+        if gemini_api_key:
+            logger.info("Gemini Translator 초기화 (Claude 미설정)...")
+            translator = _ProductTranslator(api_key=gemini_api_key)
+            if translator._initialized:
+                logger.info(f"Gemini 초기화 성공: {translator._model_name}")
+            else:
+                translator = None
+        else:
+            logger.warning("번역 API 키 없음 (CLAUDE_API_KEY 또는 GEMINI_API_KEY 필요)")
     else:
-        logger.warning("Translator 초기화 실패 — 번역 기능이 작동하지 않습니다")
+        logger.info("Claude API 키 확인됨 — Gemini 초기화 건너뜀")
 
     # Scraper 초기화
     logger.info("Scraper 초기화...")
@@ -82,13 +85,10 @@ async def initialize_v1_services():
     # Claude 번역기 초기화
     from .translator.claude_client import ClaudeTranslator
     claude_translator = None
-    claude_api_key = os.getenv("CLAUDE_API_KEY") or settings.claude_api_key
     if claude_api_key:
         claude_translator = ClaudeTranslator(api_key=claude_api_key)
         masked = claude_api_key[:8] + "..." + claude_api_key[-4:] if len(claude_api_key) > 12 else "***"
         logger.info(f"Claude 번역기 초기화 완료 (키: {masked})")
-    else:
-        logger.warning("CLAUDE_API_KEY 미설정 — Gemini 폴백 사용")
 
     # GB 번역기 초기화 (Claude 우선, Gemini 폴백)
     from .translator.gb_translator import GBProductTranslator
