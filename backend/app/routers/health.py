@@ -1560,3 +1560,98 @@ async def debug_axios_save_test():
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/token-and-direct-api", summary="토큰 추출 + httpx 직접 호출")
+async def debug_token_and_direct_api():
+    """브라우저 쿠키에서 토큰 추출 -> Python httpx로 aggregator API 직접 호출"""
+    import asyncio
+    import httpx
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    page = _artist_session.page
+
+    try:
+        import re
+        m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+        pid = m.group(1) if m else ""
+
+        token_info = await page.evaluate("""
+            () => {
+                const r = {};
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    const v = localStorage.getItem(k);
+                    if (k.match(/token|auth|jwt|session|access/i))
+                        r['ls_' + k] = v?.substring(0, 150);
+                }
+                r.cookies = document.cookie.substring(0, 500);
+                const vm = document.querySelector('#app')?.__vue__;
+                const ax = vm?.$axios || vm?.$root?.$axios;
+                if (ax?.defaults?.headers?.common)
+                    r.axiosHeaders = JSON.stringify(ax.defaults.headers.common).substring(0, 300);
+                return r;
+            }
+        """)
+
+        cookies = await page.context.cookies()
+        cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+        idus_cookies = [{"name": c["name"], "domain": c["domain"],
+                         "value": c["value"][:40]} for c in cookies if "idus" in c.get("domain", "")]
+
+        detail_id = await page.evaluate(
+            "() => document.querySelector('#app')?.__vue__?.$store?.state?.globalProduct?._detail?.id || 0"
+        )
+
+        base = "https://artist-aggregator.idus.com"
+        api_tests = []
+        headers = {
+            "Cookie": cookie_header,
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+            "Origin": "https://artist.idus.com",
+            "Referer": "https://artist.idus.com/",
+        }
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            for label, url in [
+                ("commission", f"{base}/api/v1/commission"),
+                ("global-detail", f"{base}/api/v1/global/product/{detail_id}"),
+            ]:
+                try:
+                    r = await client.get(url, headers=headers)
+                    api_tests.append({"label": label, "status": r.status_code, "body": r.text[:200]})
+                except Exception as e:
+                    api_tests.append({"label": label, "error": str(e)[:100]})
+
+            if detail_id:
+                payload = {
+                    "publish_status": "WRITING", "name": "test", "language_code": "ja",
+                    "images": ["https://image.idus.com/image/files/6c105d356fcf444ebfd4e9c88265a4ac.jpg",
+                               "https://image.idus.com/image/files/ddb60123067b4b3ba0d33ab589fad709.jpg",
+                               "https://image.idus.com/image/files/69fcfba020d4451f9890c7808e1bc6e0.jpg",
+                               "https://image.idus.com/image/files/e0184c029db149ffa761efefabfaa0d6.jpg"],
+                    "keywords": ["test"],
+                    "descriptions": [{"type": "TEXT", "value": "test desc", "label": "", "sort": 0}],
+                    "option_groups": [], "prohibited_nations": [],
+                    "clearance_documents": [], "status": "DRAFT",
+                }
+                for label, method, url in [
+                    ("draft-put", "PUT", f"{base}/api/v1/global/product/{detail_id}/draft"),
+                    ("draft-post", "POST", f"{base}/api/v1/global/product/{detail_id}/draft"),
+                ]:
+                    try:
+                        r = await client.request(method, url, headers={**headers, "Content-Type": "application/json"}, json=payload)
+                        api_tests.append({"label": label, "status": r.status_code, "body": r.text[:300]})
+                    except Exception as e:
+                        api_tests.append({"label": label, "error": str(e)[:100]})
+
+        return {"success": True, "pid": pid, "detailId": detail_id, "tokenInfo": token_info,
+                "idusCookies": idus_cookies, "totalCookies": len(cookies), "apiTests": api_tests}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
