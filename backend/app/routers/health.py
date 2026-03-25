@@ -1455,3 +1455,108 @@ async def debug_api_test():
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/axios-save-test", summary="$axios로 실제 임시저장 테스트")
+async def debug_axios_save_test():
+    """$axios 인스턴스로 글로벌 작품 임시저장을 시도합니다."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    page = _artist_session.page
+
+    try:
+        import re
+        m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+        pid = m.group(1) if m else ""
+        if not pid:
+            return {"error": "product_id 없음"}
+
+        if "/global" not in page.url:
+            try:
+                await page.goto(f"https://artist.idus.com/product/{pid}/global", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+        result = await page.evaluate("""
+            async (uuid) => {
+                const output = {};
+                const vm = document.querySelector('#app')?.__vue__;
+                if (!vm) return { error: 'Vue not found' };
+
+                const axios = vm.$axios || vm.$root?.$axios || window.$nuxt?.$axios;
+                if (!axios) return { error: '$axios not found' };
+
+                const store = vm.$store;
+                const detail = store?.state?.globalProduct?._detail || {};
+                const form = store?.state?.productForm?._item || {};
+
+                output.detailId = detail.id;
+                output.formId = form.id;
+                output.formUuid = form.uuid;
+
+                // $axios의 baseURL 확인
+                output.axiosBaseURL = axios.defaults?.baseURL || 'none';
+
+                // $axios로 가능한 API 경로들 탐색
+                const testUrls = [
+                    { label: 'aggregator-draft', method: 'put', url: `https://artist-aggregator.idus.com/api/v1/global/product/${detail.id || 0}/draft` },
+                    { label: 'aggregator-v2-draft', method: 'put', url: `https://artist-aggregator.idus.com/api/v2/global/product-detail/${uuid}` },
+                    { label: 'relative-draft', method: 'put', url: `/api/v1/global/product/${detail.id || 0}/draft` },
+                    { label: 'relative-v2', method: 'put', url: `/api/v2/global/product-detail/${uuid}` },
+                ];
+
+                const payload = {
+                    publish_status: 'WRITING',
+                    name: 'テスト作品名',
+                    language_code: 'ja',
+                    images: [
+                        'https://image.idus.com/image/files/6c105d356fcf444ebfd4e9c88265a4ac.jpg',
+                        'https://image.idus.com/image/files/ddb60123067b4b3ba0d33ab589fad709.jpg',
+                        'https://image.idus.com/image/files/69fcfba020d4451f9890c7808e1bc6e0.jpg',
+                        'https://image.idus.com/image/files/e0184c029db149ffa761efefabfaa0d6.jpg',
+                    ],
+                    keywords: ['テスト'],
+                    descriptions: [
+                        { type: 'TEXT', value: 'テスト説明文です。', label: '', sort: 0 }
+                    ],
+                    option_groups: [],
+                    prohibited_nations: [],
+                    clearance_documents: [],
+                    status: 'DRAFT',
+                };
+
+                output.tests = [];
+                for (const t of testUrls) {
+                    try {
+                        const resp = await axios({ method: t.method, url: t.url, data: payload });
+                        output.tests.push({
+                            label: t.label, url: t.url,
+                            status: resp.status, ok: true,
+                            data: JSON.stringify(resp.data)?.substring(0, 300),
+                        });
+                    } catch (e) {
+                        const errResp = e.response;
+                        output.tests.push({
+                            label: t.label, url: t.url,
+                            status: errResp?.status || null,
+                            ok: false,
+                            error: (errResp?.data ? JSON.stringify(errResp.data).substring(0, 300) : (e.message || '').substring(0, 200)),
+                        });
+                    }
+                }
+
+                return output;
+            }
+        """, pid)
+
+        return {"success": True, "pid": pid, "data": result}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
