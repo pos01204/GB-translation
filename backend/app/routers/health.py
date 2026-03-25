@@ -1343,3 +1343,115 @@ async def debug_intercept_save():
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/api-test", summary="3가지 API 호출 방안 동시 테스트")
+async def debug_api_test():
+    """CORS 해결을 위해 3가지 방안을 한 번에 테스트합니다."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    page = _artist_session.page
+
+    try:
+        import re
+        m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+        pid = m.group(1) if m else ""
+        if not pid:
+            return {"error": "product_id 없음"}
+
+        if "/global" not in page.url:
+            try:
+                await page.goto(f"https://artist.idus.com/product/{pid}/global", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+        result = await page.evaluate("""
+            async (uuid) => {
+                const output = {};
+                const app = document.querySelector('#app');
+                if (!app || !app.__vue__) return { error: 'Vue app not found' };
+                const vm = app.__vue__;
+                const store = vm.$store;
+
+                // ═══ 방안 1: $axios 인스턴스 탐색 ═══
+                const ax = {};
+                ax.vm_axios = !!vm.$axios;
+                ax.root_axios = !!vm.$root?.$axios;
+                ax.nuxt_axios = !!window.$nuxt?.$axios;
+                ax.window_axios = !!window.axios;
+                const axiosInst = vm.$axios || vm.$root?.$axios || window.$nuxt?.$axios || window.axios;
+                if (axiosInst) {
+                    ax.found = true;
+                    try {
+                        const r = await axiosInst.get('/api/v1/commission');
+                        ax.testOk = true;
+                        ax.testStatus = r.status;
+                    } catch (e) { ax.testOk = false; ax.testErr = e.message?.substring(0, 100); }
+                } else { ax.found = false; }
+                output.axios = ax;
+
+                // ═══ 방안 2: 같은 도메인 fetch ═══
+                const sf = {};
+                try {
+                    const r = await fetch('/api/v1/commission', { credentials: 'include' });
+                    sf.status = r.status;
+                    sf.ok = r.ok;
+                } catch (e) { sf.error = e.message; }
+                output.sameOriginFetch = sf;
+
+                // ═══ 방안 3: Vuex dispatch ═══
+                const vx = {};
+                if (!store) { vx.error = 'no store'; }
+                else {
+                    // 3-1: selectGlobalProductDetail
+                    try {
+                        await store.dispatch('globalProduct/selectGlobalProductDetail', { productUuid: uuid });
+                        vx.selectDetail = 'ok';
+                        await new Promise(r => setTimeout(r, 2000));
+                    } catch (e) { vx.selectDetail = (e.message || String(e)).substring(0, 200); }
+
+                    // 3-2: 상태 확인
+                    const d = store.state.globalProduct?._detail || {};
+                    const ui = store.state.globalProduct?._detailUI || {};
+                    vx.detailId = d.id;
+                    vx.detailUuid = d.uuid;
+                    vx.uiLang = ui.languageType;
+                    vx.uiKeys = Object.keys(ui).join(',');
+
+                    // 3-3: setDetailUI + insertDraft
+                    try {
+                        store.commit('globalProduct/setDetailUI', {
+                            ...ui,
+                            productName: 'テスト',
+                            images: ['https://image.idus.com/image/files/6c105d356fcf444ebfd4e9c88265a4ac.jpg',
+                                     'https://image.idus.com/image/files/ddb60123067b4b3ba0d33ab589fad709.jpg',
+                                     'https://image.idus.com/image/files/69fcfba020d4451f9890c7808e1bc6e0.jpg',
+                                     'https://image.idus.com/image/files/e0184c029db149ffa761efefabfaa0d6.jpg'],
+                            keywords: ['test'],
+                            premiumDescription: [{ type: 'TEXT', value: 'テスト', label: '', uuid: 'test1' }],
+                        });
+                        vx.setUI = 'ok';
+                    } catch (e) { vx.setUI = e.message; }
+
+                    try {
+                        await store.dispatch('globalProduct/insertGlobalProductDraft');
+                        vx.insertDraft = 'ok';
+                    } catch (e) { vx.insertDraft = (e.message || String(e)).substring(0, 300); }
+                }
+                output.vuex = vx;
+
+                return output;
+            }
+        """, pid)
+
+        return {"success": True, "pid": pid, "data": result}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
