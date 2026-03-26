@@ -1921,3 +1921,120 @@ async def debug_register_flow_test(product_id: str = ""):
         return {"success":True,"pid":pid,"steps":steps,"api":api_info,"urls":[c["url"] for c in captured]}
     except Exception as e:
         return {"success":False,"error":str(e),"steps":steps}
+
+
+@router.get("/api/debug/route-intercept-test", summary="Route intercept test")
+async def debug_route_intercept_test():
+    """route intercept로 migrate-product payload 교체 테스트"""
+    import asyncio
+    import json as jsonlib
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "no session"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "not authenticated"}
+
+    page = _artist_session.page
+    steps = []
+    intercept_log = []
+
+    try:
+        import re
+        m = re.search(r"/product/([a-f0-9-]{36})", page.url)
+        pid = m.group(1) if m else ""
+        if not pid:
+            return {"error": "no product_id"}
+
+        # 글로벌 페이지 확인
+        if "/global" not in page.url:
+            try:
+                await page.goto(f"https://artist.idus.com/product/{pid}/global", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+        steps.append({"step": "page", "url": page.url})
+
+        # 작품명 입력
+        textarea = page.locator('textarea[name="globalProductName"]').first
+        if await textarea.count() > 0:
+            await textarea.fill("Route Intercept Test")
+            await textarea.dispatch_event("input")
+            steps.append({"step": "title", "ok": True})
+        else:
+            steps.append({"step": "title", "ok": False})
+            return {"success": False, "steps": steps, "error": "no textarea"}
+
+        # route intercept 등록
+        test_payload = {
+            "name": "Route Intercept Test",
+            "language_code": "ja",
+            "images": [
+                "https://image.idus.com/image/files/6c105d356fcf444ebfd4e9c88265a4ac.jpg",
+                "https://image.idus.com/image/files/ddb60123067b4b3ba0d33ab589fad709.jpg",
+                "https://image.idus.com/image/files/69fcfba020d4451f9890c7808e1bc6e0.jpg",
+                "https://image.idus.com/image/files/e0184c029db149ffa761efefabfaa0d6.jpg",
+            ],
+            "keywords": ["test1", "test2", "test3"],
+            "descriptions": [
+                {"type": "TEXT", "value": "This is a route intercept test description.", "label": "", "sort": 0},
+                {"type": "TEXT", "value": "Second paragraph for testing.", "label": "", "sort": 1},
+            ],
+            "option_groups": [],
+        }
+
+        async def handle_route(route):
+            request = route.request
+            intercept_log.append({"event": "intercepted", "url": request.url, "method": request.method})
+            try:
+                original = jsonlib.loads(request.post_data) if request.post_data else {}
+                modified = {**original, **test_payload}
+                intercept_log.append({
+                    "event": "modified",
+                    "orig_img": len(original.get("images", [])),
+                    "orig_kw": len(original.get("keywords", [])),
+                    "orig_desc": len(original.get("descriptions", [])),
+                    "new_img": len(modified.get("images", [])),
+                    "new_kw": len(modified.get("keywords", [])),
+                    "new_desc": len(modified.get("descriptions", [])),
+                })
+                await route.continue_(post_data=jsonlib.dumps(modified))
+            except Exception as e:
+                intercept_log.append({"event": "error", "msg": str(e)[:200]})
+                await route.continue_()
+
+        await page.route("**/migrate-product/**", handle_route)
+        steps.append({"step": "route_registered", "pattern": "**/migrate-product/**"})
+
+        try:
+            # 임시저장 클릭
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.5)
+            save_btn = page.locator('button:has-text("임시저장")').first
+            if await save_btn.count() > 0:
+                await save_btn.click()
+                steps.append({"step": "save_clicked", "ok": True})
+                await asyncio.sleep(4)
+            else:
+                steps.append({"step": "save_clicked", "ok": False, "error": "no button"})
+
+            # 스낵바
+            try:
+                snack = page.locator('.v-snack__content').first
+                if await snack.count() > 0:
+                    msg = await snack.inner_text()
+                    steps.append({"step": "snackbar", "msg": msg})
+            except Exception:
+                pass
+
+        finally:
+            await page.unroute("**/migrate-product/**")
+
+        return {
+            "success": True,
+            "steps": steps,
+            "intercept_log": intercept_log,
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e), "steps": steps, "intercept_log": intercept_log}
