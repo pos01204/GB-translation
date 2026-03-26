@@ -1802,3 +1802,122 @@ async def debug_vuex_commit_save_test():
 
     except Exception as e:
         return {"success": False, "error": str(e), "steps": steps}
+
+
+
+@router.get("/api/debug/register-flow-test", summary="Register flow test")
+async def debug_register_flow_test(product_id: str = ""):
+    import asyncio
+    if not _artist_session or not _artist_session.page:
+        return {"error": "no session"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "not authenticated"}
+    page = _artist_session.page
+    captured = []
+    steps = []
+    try:
+        import re
+        pid = product_id
+        if not pid:
+            m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+            pid = m.group(1) if m else ""
+        if not pid:
+            return {"error": "product_id needed"}
+
+        async def on_req(request):
+            if request.method in ("POST", "PUT", "PATCH"):
+                url = request.url
+                if ("aggregator" in url or "migrate" in url) and "kinesis" not in url:
+                    captured.append({"url": url, "method": request.method, "body": (request.post_data or "")[:2000]})
+        page.on("request", on_req)
+        try:
+            gurl = f"https://artist.idus.com/product/{pid}/global"
+            try:
+                await page.goto(gurl, timeout=30000)
+                await page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+            steps.append({"step": "navigate", "url": page.url})
+
+            # Page text dump
+            page_text = await page.evaluate("() => document.body.innerText.substring(0, 2000)")
+            steps.append({"step": "page_text", "text": page_text[:1200]})
+
+            # Title input
+            textarea = page.locator('textarea[name="globalProductName"]').first
+            if await textarea.count() > 0:
+                await textarea.fill("test_flow_verify")
+                await textarea.dispatch_event("input")
+                steps.append({"step": "title", "ok": True})
+
+            # Scroll and find image uploader
+            await page.evaluate("window.scrollTo(0, 300)")
+            await asyncio.sleep(1)
+            plus_clicked = await page.evaluate("""() => {
+                const els = document.querySelectorAll('[class*="ImageUploader"], [class*="imageUpload"]');
+                for (const el of els) { if (el.offsetHeight > 30) { el.click(); return {clicked:true, cls:(el.className||'').substring(0,80)}; } }
+                return {clicked:false};
+            }""")
+            steps.append({"step": "image_click", "result": plus_clicked})
+
+            if plus_clicked.get("clicked"):
+                await asyncio.sleep(1.5)
+                bs = await page.evaluate("""() => {
+                    const ds = document.querySelectorAll('.v-dialog--active, .v-bottom-sheet, [class*="bottomSheet"]');
+                    return Array.from(ds).map(d => ({
+                        text: d.innerText?.substring(0,300),
+                        items: Array.from(d.querySelectorAll('button,a,[role="button"]')).map(b=>b.textContent?.trim().substring(0,50)).filter(Boolean)
+                    }));
+                }""")
+                steps.append({"step": "bottomsheet", "data": bs})
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
+
+            # Find description buttons
+            await page.evaluate("window.scrollTo(0, 600)")
+            await asyncio.sleep(1)
+            desc_btns = await page.evaluate("""() => Array.from(document.querySelectorAll('button')).filter(b=>{
+                const t=b.textContent?.trim()||'';return t.includes('작품 설명')||t.includes('작성')||t.includes('수정');
+            }).map(b=>({text:b.textContent?.trim().substring(0,50),visible:b.offsetHeight>0}))""")
+            steps.append({"step": "desc_buttons", "buttons": desc_btns})
+
+            # Find keyword elements
+            await page.evaluate("window.scrollTo(0, 800)")
+            await asyncio.sleep(1)
+            kw_els = await page.evaluate("""() => Array.from(document.querySelectorAll('*')).filter(e=>
+                e.children.length<5&&e.textContent?.trim().includes('키워드')&&e.offsetHeight>0&&e.textContent.trim().length<50
+            ).map(e=>({tag:e.tagName,text:e.textContent.trim().substring(0,50),cls:(e.className||'').substring(0,60)}))""")
+            steps.append({"step": "keyword_elements", "elements": kw_els})
+
+            # Save
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.5)
+            save_btn = page.locator('button:has-text("임시저장")').first
+            if await save_btn.count() > 0:
+                await save_btn.click()
+                await asyncio.sleep(3)
+                steps.append({"step": "save", "ok": True})
+            try:
+                snack = page.locator('.v-snack__content').first
+                if await snack.count() > 0:
+                    msg = await snack.inner_text()
+                    steps.append({"step": "snackbar", "msg": msg})
+            except Exception:
+                pass
+
+        finally:
+            page.remove_listener("request", on_req)
+
+        import json
+        api_info = None
+        for c in captured:
+            try:
+                p = json.loads(c.get("body","{}"))
+                api_info = {"url":c["url"],"method":c["method"],"img":len(p.get("images",[])),"kw":len(p.get("keywords",[])),"desc":len(p.get("descriptions",[]))}
+            except Exception:
+                api_info = {"url":c["url"],"raw":c.get("body","")[:300]}
+            break
+        return {"success":True,"pid":pid,"steps":steps,"api":api_info,"urls":[c["url"] for c in captured]}
+    except Exception as e:
+        return {"success":False,"error":str(e),"steps":steps}
