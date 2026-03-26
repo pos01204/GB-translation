@@ -706,10 +706,18 @@ class ArtistWebSession:
         if not await self.is_authenticated():
             raise Exception("로그인이 필요합니다")
 
-        # 이미 해당 작품 페이지에 있으면 네비게이션 스킵
+        # 이미 해당 작품 페이지에 있으면 Vuex 확인 후 필요 시 reload
         if product_id in (self.page.url or ""):
             logger.info(f"이미 작품 페이지에 위치: {product_id}")
-            # 이미 있어도 Vuex 데이터 로딩 대기
+            # Vuex store 접근 가능한지 빠르게 확인
+            has_store = await self.page.evaluate(
+                "() => !!document.querySelector('#app')?.__vue__?.$store"
+            )
+            if not has_store:
+                logger.warning("Vuex store 접근 불가 — 페이지 reload")
+                await self.page.reload(timeout=30000)
+                await self.page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(3)
             await self._wait_for_vuex_product_data(product_id)
             return True
 
