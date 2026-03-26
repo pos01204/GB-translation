@@ -177,11 +177,35 @@ class ProductWriter:
                     await asyncio.sleep(0.3)
                     entered += 1
 
-        # 3단계: 에디터 저장
-        save_btn = modal.locator('button:has-text("저장"), text="저장"').first
-        if await self._click(save_btn, label="에디터 저장"):
+        # 3단계: 에디터 저장 (모달 내 "저장" 버튼 클릭)
+        saved = False
+        for selector in [
+            '.v-dialog--active button:has-text("저장")',
+            '.v-dialog--active >> text=저장',
+        ]:
+            try:
+                btn = self.page.locator(selector).first
+                if await btn.count() > 0:
+                    await btn.click()
+                    saved = True
+                    await asyncio.sleep(1)
+                    break
+            except Exception:
+                continue
+
+        if not saved:
+            # X 버튼이나 ESC로 닫기
+            close = self.page.locator('.v-dialog--active button:has-text("닫기")').first
+            if await close.count() > 0:
+                await close.click()
+            else:
+                await self.page.keyboard.press("Escape")
             await asyncio.sleep(1)
-        else:
+
+        # 모달이 닫혔는지 확인 (안 닫혔으면 ESC 재시도)
+        for _ in range(3):
+            if await self.page.locator('.v-dialog--active').count() == 0:
+                break
             await self.page.keyboard.press("Escape")
             await asyncio.sleep(0.5)
 
@@ -230,10 +254,29 @@ class ProductWriter:
                 entered += 1
 
         # 모달 저장
-        save_btn = modal.locator('text="저장"').first
-        if await self._click(save_btn, label="키워드 저장"):
-            await asyncio.sleep(1)
-        else:
+        saved = False
+        for selector in [
+            '.v-dialog--active button:has-text("저장")',
+            '.v-dialog--active >> text=저장',
+        ]:
+            try:
+                btn = self.page.locator(selector).first
+                if await btn.count() > 0:
+                    await btn.click()
+                    saved = True
+                    await asyncio.sleep(1)
+                    break
+            except Exception:
+                continue
+
+        if not saved:
+            await self.page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
+        # 모달 닫힘 확인
+        for _ in range(3):
+            if await self.page.locator('.v-dialog--active').count() == 0:
+                break
             await self.page.keyboard.press("Escape")
             await asyncio.sleep(0.5)
 
@@ -287,11 +330,27 @@ class ProductWriter:
                     await asyncio.sleep(0.3)
 
         # 적용
-        apply_btn = modal.locator('text="적용"').first
-        if await self._click(apply_btn, label="옵션 적용"):
-            await asyncio.sleep(1)
-        else:
+        applied = False
+        for selector in [
+            '.v-dialog--active button:has-text("적용")',
+            '.v-dialog--active >> text=적용',
+        ]:
+            try:
+                btn = self.page.locator(selector).first
+                if await btn.count() > 0:
+                    await btn.click()
+                    applied = True
+                    await asyncio.sleep(1)
+                    break
+            except Exception:
+                continue
+
+        # 모달 닫힘 확인
+        for _ in range(3):
+            if await self.page.locator('.v-dialog--active').count() == 0:
+                break
             await self.page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
 
         logger.info(f"옵션 {len(options)}개 입력 ({language})")
         return True
