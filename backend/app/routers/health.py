@@ -1655,3 +1655,150 @@ async def debug_token_and_direct_api():
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@router.get("/api/debug/vuex-commit-save-test", summary="Vuex commit + 임시저장 버튼 조합 테스트")
+async def debug_vuex_commit_save_test():
+    """Vuex setDetailUI commit으로 이미지+설명+키워드 설정 후 임시저장 버튼 클릭.
+    캡처된 API 요청의 payload에 이미지/설명이 포함되는지 확인."""
+    import asyncio
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "세션 미초기화"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "로그인 필요"}
+
+    page = _artist_session.page
+    captured = []
+    steps = []
+
+    try:
+        async def on_req(request):
+            if request.method in ("POST", "PUT", "PATCH"):
+                url = request.url
+                if "kinesis" not in url and "sentry" not in url and "channel" not in url and "facebook" not in url and "cognito" not in url:
+                    captured.append({"url": url, "method": request.method, "body": (request.post_data or "")[:2000]})
+
+        page.on("request", on_req)
+
+        try:
+            import re
+            m = re.search(r'/product/([a-f0-9-]{36})', page.url)
+            pid = m.group(1) if m else ""
+            if not pid:
+                return {"error": "product_id 없음"}
+
+            # STEP 1: 글로벌 페이지 이동
+            if "/global" not in page.url:
+                try:
+                    await page.goto(f"https://artist.idus.com/product/{pid}/global", timeout=30000)
+                    await page.wait_for_load_state("domcontentloaded")
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+            steps.append({"step": "글로벌 이동", "url": page.url})
+
+            # STEP 2: 작품명 textarea 입력
+            textarea = page.locator('textarea[name="globalProductName"]').first
+            if await textarea.count() > 0:
+                await textarea.fill("テスト作品名_Vuex検証")
+                await textarea.dispatch_event("input")
+                steps.append({"step": "작품명 입력", "ok": True})
+            else:
+                steps.append({"step": "작품명 입력", "ok": False})
+
+            # STEP 3: Vuex setDetailUI commit (이미지 + 설명 + 키워드)
+            vuex_result = await page.evaluate("""
+                () => {
+                    const app = document.querySelector('#app');
+                    if (!app || !app.__vue__ || !app.__vue__.$store) return { error: 'no store' };
+                    const store = app.__vue__.$store;
+                    const ui = store.state.globalProduct?._detailUI || {};
+
+                    const newUI = {
+                        ...ui,
+                        productName: 'テスト作品名_Vuex検証',
+                        images: [
+                            'https://image.idus.com/image/files/6c105d356fcf444ebfd4e9c88265a4ac.jpg',
+                            'https://image.idus.com/image/files/ddb60123067b4b3ba0d33ab589fad709.jpg',
+                            'https://image.idus.com/image/files/69fcfba020d4451f9890c7808e1bc6e0.jpg',
+                            'https://image.idus.com/image/files/e0184c029db149ffa761efefabfaa0d6.jpg',
+                        ],
+                        keywords: ['テスト1', 'テスト2', 'テスト3'],
+                        premiumDescription: [
+                            { type: 'TEXT', value: 'テスト説明文です。これはVuex commit経由の検証です。', label: '', uuid: 'test_txt_1' },
+                            { type: 'IMAGE', value: ['https://image.idus.com/image/files/6c105d356fcf444ebfd4e9c88265a4ac.jpg'], label: '', uuid: 'test_img_1' },
+                            { type: 'TEXT', value: '二番目のテスト段落です。', label: '', uuid: 'test_txt_2' },
+                        ],
+                    };
+                    store.commit('globalProduct/setDetailUI', newUI);
+
+                    // 확인
+                    const updated = store.state.globalProduct?._detailUI || {};
+                    return {
+                        ok: true,
+                        name: updated.productName,
+                        imgCount: updated.images?.length || 0,
+                        kwCount: updated.keywords?.length || 0,
+                        descCount: updated.premiumDescription?.length || 0,
+                    };
+                }
+            """)
+            steps.append({"step": "Vuex commit", "result": vuex_result})
+
+            # STEP 4: 임시저장 버튼 클릭
+            await asyncio.sleep(1)
+            save_btn = page.locator('button:has-text("임시저장")').first
+            if await save_btn.count() > 0:
+                await save_btn.click()
+                await asyncio.sleep(3)
+                steps.append({"step": "임시저장 클릭", "ok": True})
+            else:
+                steps.append({"step": "임시저장 클릭", "ok": False})
+
+            # STEP 5: 스낵바 확인
+            try:
+                snack = page.locator('.v-snack__content').first
+                if await snack.count() > 0:
+                    msg = await snack.inner_text()
+                    steps.append({"step": "스낵바", "message": msg})
+            except Exception:
+                pass
+
+        finally:
+            page.remove_listener("request", on_req)
+
+        # 캡처된 요청에서 migrate-product 찾아 payload 분석
+        api_payload_analysis = None
+        for c in captured:
+            if "migrate-product" in c.get("url", "") or "global" in c.get("url", ""):
+                body = c.get("body", "")
+                import json
+                try:
+                    parsed = json.loads(body)
+                    api_payload_analysis = {
+                        "url": c["url"],
+                        "method": c["method"],
+                        "has_images": bool(parsed.get("images")),
+                        "image_count": len(parsed.get("images", [])),
+                        "has_keywords": bool(parsed.get("keywords")),
+                        "keyword_count": len(parsed.get("keywords", [])),
+                        "has_descriptions": bool(parsed.get("descriptions")),
+                        "desc_count": len(parsed.get("descriptions", [])),
+                        "name": parsed.get("name", "")[:50],
+                        "language_code": parsed.get("language_code", ""),
+                    }
+                except Exception:
+                    api_payload_analysis = {"url": c["url"], "raw_body": body[:500]}
+                break
+
+        return {
+            "success": True,
+            "steps": steps,
+            "captured_count": len(captured),
+            "api_payload": api_payload_analysis,
+            "all_captured_urls": [c["url"] for c in captured],
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e), "steps": steps}
