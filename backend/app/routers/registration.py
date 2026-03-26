@@ -164,7 +164,7 @@ async def register_single(request: RegisterSingleRequest):
             global_data=global_data,
             product_id=request.product_id,
             save_as_draft=request.save_as_draft,
-            domestic_images=domestic_image_urls,
+            target_languages=request.target_languages,
         )
 
         success = len(result["languages_success"]) > 0
