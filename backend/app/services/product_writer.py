@@ -218,18 +218,40 @@ class ProductWriter:
         # keywords
         keywords = [kw.strip().lstrip('#') for kw in (data.keywords or []) if kw.strip()]
 
-        # option_groups
+        # option_groups — Vuex productOptionGroups 구조 기반 (다국어)
         option_groups = []
         if global_options:
-            for opt in global_options:
-                name = opt.name_en if language == "en" else opt.name_ja
-                values = opt.values_en if language == "en" else opt.values_ja
-                if name and values:
-                    option_groups.append({
-                        "name": name,
-                        "type": opt.option_type or "Basic",
-                        "values": [{"value": v, "price": 0} for v in values],
+            for i, opt in enumerate(global_options):
+                name_en = opt.name_en or ""
+                name_ja = opt.name_ja or ""
+                values_en = opt.values_en or []
+                values_ja = opt.values_ja or []
+                if not name_en and not name_ja:
+                    continue
+                product_options = []
+                max_len = max(len(values_en), len(values_ja))
+                for j in range(max_len):
+                    val_en = values_en[j] if j < len(values_en) else ""
+                    val_ja = values_ja[j] if j < len(values_ja) else ""
+                    product_options.append({
+                        "value": [
+                            {"lang": "ja", "value": val_ja},
+                            {"lang": "en", "value": val_en},
+                        ],
+                        "price": 0,
+                        "sort": j,
+                        "customerRequestType": "UNNECESSARY",
+                        "image": "",
                     })
+                option_groups.append({
+                    "value": [
+                        {"lang": "ja", "value": name_ja},
+                        {"lang": "en", "value": name_en},
+                    ],
+                    "productOptions": product_options,
+                    "sort": i,
+                    "optionType": opt.option_type or "Basic",
+                })
 
         return {
             "publish_status": "WRITING",
@@ -238,7 +260,7 @@ class ProductWriter:
             "images": domestic_images or [],
             "keywords": keywords,
             "descriptions": descriptions,
-            "option_groups": [],  # TODO: 옵션 구조 확인 후 활성화
+            "option_groups": option_groups,
             "status": "DRAFT",
             "prohibited_nations": [],
             "clearance_documents": [],
