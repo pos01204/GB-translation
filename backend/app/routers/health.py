@@ -2153,3 +2153,162 @@ async def debug_option_api_capture():
 
     except Exception as e:
         return {"success": False, "error": str(e), "steps": steps}
+
+
+@router.get("/api/debug/option-add-flow", summary="Option add flow test")
+async def debug_option_add_flow():
+    """옵션 추가 버튼 클릭 후 입력 필드 DOM 캡처 + 테스트 입력 + 적용 + 임시저장"""
+    import asyncio
+    import json as jsonlib
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "no session"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "not authenticated"}
+
+    page = _artist_session.page
+    captured = []
+    steps = []
+
+    try:
+        import re
+        m = re.search(r"/product/([a-f0-9-]{36})", page.url)
+        pid = m.group(1) if m else ""
+        if not pid:
+            return {"error": "no product_id"}
+
+        if "/global" not in page.url:
+            try:
+                await page.goto(f"https://artist.idus.com/product/{pid}/global", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+        # 모든 요청 캡처
+        async def on_req(request):
+            if request.method in ("POST", "PUT", "PATCH"):
+                url = request.url
+                if "kinesis" not in url and "sentry" not in url and "facebook" not in url and "channel" not in url and "cognito" not in url:
+                    captured.append({"url": url, "method": request.method, "body": (request.post_data or "")[:3000]})
+        page.on("request", on_req)
+
+        try:
+            # 1. 옵션 편집 모달 열기
+            await page.evaluate("window.scrollTo(0, 800)")
+            await asyncio.sleep(1)
+            edit_btn = page.locator('button:has-text("옵션 편집")').first
+            if await edit_btn.count() > 0:
+                await edit_btn.click()
+                await asyncio.sleep(2)
+                steps.append({"step": "modal_open", "ok": True})
+            else:
+                return {"error": "option edit button not found"}
+
+            # 2. "추가" 버튼 클릭
+            modal = page.locator('.v-dialog--active')
+            add_btn = modal.locator('button:has-text("추가")').first
+            if await add_btn.count() > 0:
+                await add_btn.click()
+                await asyncio.sleep(2)
+                steps.append({"step": "add_clicked", "ok": True})
+            else:
+                steps.append({"step": "add_clicked", "ok": False})
+                await page.keyboard.press("Escape")
+                return {"success": False, "steps": steps}
+
+            # 3. 추가 후 모달 DOM 캡처 (입력 필드)
+            after_add = await page.evaluate("""() => {
+                const d = document.querySelector('.v-dialog--active');
+                if (!d) return {found: false};
+                return {
+                    found: true,
+                    text: d.innerText?.substring(0, 1500),
+                    buttons: Array.from(d.querySelectorAll('button')).map(b => b.textContent?.trim().substring(0,40)).filter(Boolean),
+                    inputs: Array.from(d.querySelectorAll('input[type="text"],textarea')).map(i => ({
+                        tag: i.tagName, type: i.type, name: i.name || '',
+                        placeholder: i.placeholder?.substring(0,60) || '',
+                        value: i.value?.substring(0,60) || '',
+                        cls: (i.className||'').substring(0,60),
+                    })),
+                    radios: Array.from(d.querySelectorAll('input[type="radio"]')).map(r => ({
+                        name: r.name, value: r.value, checked: r.checked,
+                    })),
+                };
+            }""")
+            steps.append({"step": "after_add_dom", "data": after_add})
+
+            # 4. 옵션명 입력 테스트
+            name_input = modal.locator('input[type="text"]').first
+            if await name_input.count() > 0:
+                await name_input.fill("Design")
+                steps.append({"step": "name_filled", "ok": True})
+            else:
+                steps.append({"step": "name_filled", "ok": False})
+
+            # 5. 옵션값 입력 - "추가+" 링크 클릭 후 입력
+            # DOM 재확인
+            await asyncio.sleep(1)
+            after_name = await page.evaluate("""() => {
+                const d = document.querySelector('.v-dialog--active');
+                if (!d) return {found: false};
+                return {
+                    found: true,
+                    inputs: Array.from(d.querySelectorAll('input[type="text"],textarea')).map(i => ({
+                        name: i.name || '', placeholder: i.placeholder?.substring(0,60) || '',
+                        value: i.value?.substring(0,60) || '',
+                    })),
+                    buttons: Array.from(d.querySelectorAll('button,a')).map(b => b.textContent?.trim().substring(0,40)).filter(Boolean),
+                };
+            }""")
+            steps.append({"step": "after_name_dom", "data": after_name})
+
+            # 6. 적용 + ESC
+            apply = modal.locator('text=적용').first
+            if await apply.count() > 0:
+                await apply.click()
+                await asyncio.sleep(2)
+                steps.append({"step": "apply", "ok": True})
+            else:
+                await page.keyboard.press("Escape")
+                steps.append({"step": "apply", "ok": False})
+
+            # 7. 임시저장 (option_groups 포함 확인)
+            await asyncio.sleep(1)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.5)
+            save = page.locator('button:has-text("임시저장")').first
+            if await save.count() > 0:
+                await save.click()
+                await asyncio.sleep(4)
+                steps.append({"step": "save", "ok": True})
+                try:
+                    snack = page.locator('.v-snack__content').first
+                    if await snack.count() > 0:
+                        msg = await snack.inner_text()
+                        steps.append({"step": "snackbar", "msg": msg})
+                except Exception:
+                    pass
+
+        finally:
+            page.remove_listener("request", on_req)
+
+        # 캡처 분석
+        option_api = []
+        for c in captured:
+            info = {"url": c["url"], "method": c["method"]}
+            try:
+                p = jsonlib.loads(c["body"])
+                info["keys"] = list(p.keys()) if isinstance(p, dict) else "not_dict"
+                og = p.get("option_groups", [])
+                info["option_groups_len"] = len(og)
+                if og:
+                    info["option_groups_sample"] = jsonlib.dumps(og[0])[:500] if og else ""
+            except Exception:
+                info["body_raw"] = c["body"][:300]
+            option_api.append(info)
+
+        return {"success": True, "steps": steps, "captured": option_api}
+
+    except Exception as e:
+        return {"success": False, "error": str(e), "steps": steps}
