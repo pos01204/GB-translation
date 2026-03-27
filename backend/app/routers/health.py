@@ -1989,6 +1989,20 @@ async def debug_route_intercept_test():
             try:
                 original = jsonlib.loads(request.post_data) if request.post_data else {}
                 modified = {**original, **test_payload}
+                # 원본 payload 전체 키 + 각 값의 타입/샘플 덤프
+                orig_dump = {}
+                for k, v in original.items():
+                    if isinstance(v, list):
+                        orig_dump[k] = {"type": "list", "len": len(v), "sample": jsonlib.dumps(v[0])[:200] if v else "[]"}
+                    elif isinstance(v, dict):
+                        orig_dump[k] = {"type": "dict", "keys": list(v.keys())[:10], "sample": jsonlib.dumps(v)[:200]}
+                    else:
+                        orig_dump[k] = {"type": type(v).__name__, "value": str(v)[:100]}
+                intercept_log.append({
+                    "event": "original_payload",
+                    "keys": list(original.keys()),
+                    "detail": orig_dump,
+                })
                 intercept_log.append({
                     "event": "modified",
                     "orig_img": len(original.get("images", [])),
