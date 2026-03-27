@@ -2052,3 +2052,104 @@ async def debug_route_intercept_test():
 
     except Exception as e:
         return {"success": False, "error": str(e), "steps": steps, "intercept_log": intercept_log}
+
+
+@router.get("/api/debug/option-api-capture", summary="Option API capture")
+async def debug_option_api_capture():
+    """옵션 편집 모달에서 적용 시 호출되는 API를 캡처합니다."""
+    import asyncio
+    import json as jsonlib
+
+    if not _artist_session or not _artist_session.page:
+        return {"error": "no session"}
+    if not await _artist_session.is_authenticated():
+        return {"error": "not authenticated"}
+
+    page = _artist_session.page
+    captured = []
+    steps = []
+
+    try:
+        import re
+        m = re.search(r"/product/([a-f0-9-]{36})", page.url)
+        pid = m.group(1) if m else ""
+        if not pid:
+            return {"error": "no product_id"}
+
+        if "/global" not in page.url:
+            try:
+                await page.goto(f"https://artist.idus.com/product/{pid}/global", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+        steps.append({"step": "page", "url": page.url})
+
+        # 모든 POST/PUT/PATCH 요청 캡처
+        async def on_req(request):
+            if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+                url = request.url
+                if "kinesis" not in url and "sentry" not in url and "facebook" not in url and "channel" not in url:
+                    body = request.post_data or ""
+                    captured.append({"url": url, "method": request.method, "body": body[:3000]})
+
+        page.on("request", on_req)
+
+        try:
+            # 옵션 편집 버튼 클릭
+            await page.evaluate("window.scrollTo(0, 800)")
+            await asyncio.sleep(1)
+            edit_btn = page.locator('button:has-text("옵션 편집")').first
+            if await edit_btn.count() > 0:
+                await edit_btn.click()
+                await asyncio.sleep(2)
+                steps.append({"step": "option_edit_clicked", "ok": True})
+
+                # 모달 DOM 덤프
+                modal_dump = await page.evaluate("""() => {
+                    const d = document.querySelector('.v-dialog--active');
+                    if (!d) return {found: false};
+                    return {
+                        found: true,
+                        text: d.innerText?.substring(0, 800),
+                        buttons: Array.from(d.querySelectorAll('button')).map(b => b.textContent?.trim().substring(0,40)).filter(Boolean),
+                        inputs: Array.from(d.querySelectorAll('input,textarea')).map(i => ({
+                            tag: i.tagName, type: i.type, name: i.name,
+                            placeholder: i.placeholder?.substring(0,40),
+                            value: i.value?.substring(0,60),
+                        })),
+                    };
+                }""")
+                steps.append({"step": "modal_dump", "data": modal_dump})
+
+                # "적용" 버튼 클릭
+                apply_btn = page.locator('.v-dialog--active >> text=적용').first
+                if await apply_btn.count() > 0:
+                    await apply_btn.click()
+                    await asyncio.sleep(3)
+                    steps.append({"step": "apply_clicked", "ok": True})
+                else:
+                    steps.append({"step": "apply_clicked", "ok": False, "error": "no apply button"})
+                    await page.keyboard.press("Escape")
+            else:
+                steps.append({"step": "option_edit_clicked", "ok": False})
+
+        finally:
+            page.remove_listener("request", on_req)
+
+        # 캡처된 요청 분석
+        option_requests = []
+        for c in captured:
+            info = {"url": c["url"], "method": c["method"]}
+            try:
+                parsed = jsonlib.loads(c["body"])
+                info["keys"] = list(parsed.keys()) if isinstance(parsed, dict) else "not_dict"
+                info["body_preview"] = c["body"][:500]
+            except Exception:
+                info["body_preview"] = c["body"][:500]
+            option_requests.append(info)
+
+        return {"success": True, "steps": steps, "captured": option_requests}
+
+    except Exception as e:
+        return {"success": False, "error": str(e), "steps": steps}
