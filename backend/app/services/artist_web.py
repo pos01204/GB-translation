@@ -37,6 +37,7 @@ class ArtistWebSession:
         self._authenticated = False
         self._initialized = False
         self._last_api_raw_sample: dict | None = None
+        self._page_lock = asyncio.Lock()  # 동시 페이지 조작 방지
         self._product_list_cache: dict = {}  # {status: (timestamp, products)}
         self._saved_email: Optional[str] = None
         self._saved_password: Optional[str] = None
@@ -194,6 +195,11 @@ class ArtistWebSession:
         if not await self.is_authenticated():
             raise Exception("로그인이 필요합니다")
 
+        # ── 동시 호출 방지 (Lock) ──
+        async with self._page_lock:
+            return await self._get_product_list_impl(status)
+
+    async def _get_product_list_impl(self, status: str) -> list[ProductSummary]:
         # ── 캐시 확인 ──
         CACHE_TTL = 300  # 5분
 
