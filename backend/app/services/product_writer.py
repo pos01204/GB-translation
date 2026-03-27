@@ -126,7 +126,10 @@ class ProductWriter:
                 intercept_result["error"] = str(e)
 
         # route 등록
-        await self.page.route("**/api/v2/global/migrate-product/**", intercept_save)
+        # 디버그 테스트에서 검증된 동일한 패턴 사용
+        route_pattern = "**/migrate-product/**"
+        await self.page.route(route_pattern, intercept_save)
+        logger.info(f"route intercept 등록: {route_pattern}")
 
         try:
             # 5. "임시저장" 버튼 클릭
@@ -168,7 +171,7 @@ class ProductWriter:
 
         finally:
             # route 해제
-            await self.page.unroute("**/api/v2/global/migrate-product/**")
+            await self.page.unroute("**/migrate-product/**")
 
     def _build_descriptions(self, data: LanguageData) -> list[dict]:
         """LanguageData에서 descriptions 배열 구성"""
@@ -282,7 +285,23 @@ class ProductWriter:
                 domestic_images = []
 
         # 각 언어별 등록
-        for lang in target_languages:
+        for i, lang in enumerate(target_languages):
+            # 이전 언어 실패 후 남은 모달/스낵바 정리
+            if i > 0:
+                for _ in range(3):
+                    try:
+                        if await self.page.locator('.v-dialog--active').count() > 0:
+                            ok_btn = self.page.locator('.v-dialog--active button:has-text("확인")').first
+                            if await ok_btn.count() > 0:
+                                await ok_btn.click()
+                            else:
+                                await self.page.keyboard.press("Escape")
+                            await asyncio.sleep(0.5)
+                        else:
+                            break
+                    except Exception:
+                        break
+                await asyncio.sleep(1)
             lang_data = global_data.ja if lang == "ja" else global_data.en
             if not lang_data:
                 result["languages_failed"].append(lang)
