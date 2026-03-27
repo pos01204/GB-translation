@@ -1,201 +1,213 @@
 """
-작가웹 글로벌 작품 등록 — Playwright route intercept 방식
+작가웹 글로벌 작품 등록 — Python httpx 직접 API 호출
 
-핵심 원리:
-1. 작품명만 textarea에 입력 (SPA의 v-model 반영)
-2. Playwright route()로 migrate-product API 요청 인터셉트 등록
-3. "임시저장" 버튼 클릭 → SPA가 API 호출
-4. 인터셉트에서 원본 payload를 가로채 우리 데이터로 교체
-5. 수정된 payload로 실제 API 전달
+핵심: Bearer 토큰을 Playwright 브라우저에서 추출 → Python httpx로 서버→서버 API 호출.
+- CORS 문제 없음 (브라우저가 아닌 서버에서 호출)
+- 클라이언트 사이드 검증 우회 (SPA 경유 안 함)
+- Bearer 토큰은 $axios 인터셉터 또는 localStorage에서 추출
 
-장점:
-- CORS 문제 없음 (SPA 자체 호출, Bearer 토큰 자동 포함)
-- 모달 UI 조작 완전 제거 (에디터/키워드/옵션 모달 불필요)
-- 이미 작동 확인된 "작품명 + 임시저장" 플로우 활용
+확정된 API:
+POST https://artist-aggregator.idus.com/api/v2/global/migrate-product/{domestic_id}
 """
 import asyncio
 import json
 import logging
+import httpx
 from typing import Optional
-from playwright.async_api import Page, Route
+from playwright.async_api import Page
 from ..models.global_product import GlobalProductData, LanguageData, GlobalOption
 from ..config import settings
 
 logger = logging.getLogger(__name__)
 
+AGGREGATOR_BASE = "https://artist-aggregator.idus.com"
+
 
 class ProductWriter:
-    """작가웹 글로벌 작품 등록 — route intercept 방식"""
+    """작가웹 글로벌 작품 등록 — httpx 직접 API 호출"""
 
     def __init__(self, page: Page):
         self.page = page
+        self._bearer_token: Optional[str] = None
 
-    async def register_language(
+    async def _extract_bearer_token(self) -> Optional[str]:
+        """브라우저에서 Bearer 토큰 추출"""
+        if self._bearer_token:
+            return self._bearer_token
+
+        token = await self.page.evaluate("""
+            () => {
+                // 1. $axios 인터셉터에서 추출
+                const app = document.querySelector('#app');
+                if (app && app.__vue__) {
+                    const vm = app.__vue__;
+                    const ax = vm.$axios || vm.$root?.$axios;
+                    if (ax && ax.defaults && ax.defaults.headers) {
+                        const auth = ax.defaults.headers.common?.Authorization
+                            || ax.defaults.headers.Authorization;
+                        if (auth) return auth.replace('Bearer ', '');
+                    }
+                    // interceptor에서 직접 추출
+                    if (ax && ax.interceptors && ax.interceptors.request) {
+                        for (const h of ax.interceptors.request.handlers || []) {
+                            if (h && h.fulfilled) {
+                                try {
+                                    // 인터셉터 함수를 호출해서 토큰 추출 시도
+                                    const config = { headers: {} };
+                                    const result = h.fulfilled(config);
+                                    if (result && result.headers && result.headers.Authorization) {
+                                        return result.headers.Authorization.replace('Bearer ', '');
+                                    }
+                                } catch(e) {}
+                            }
+                        }
+                    }
+                }
+                // 2. localStorage
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    const val = localStorage.getItem(key);
+                    if (val && val.length > 20 && val.length < 2000) {
+                        if (key.toLowerCase().includes('token') || key.toLowerCase().includes('auth')
+                            || key.toLowerCase().includes('jwt') || key.toLowerCase().includes('access')) {
+                            return val;
+                        }
+                    }
+                }
+                // 3. sessionStorage
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const key = sessionStorage.key(i);
+                    const val = sessionStorage.getItem(key);
+                    if (val && val.length > 20 && val.length < 2000) {
+                        if (key.toLowerCase().includes('token') || key.toLowerCase().includes('auth')) {
+                            return val;
+                        }
+                    }
+                }
+                // 4. cookie
+                const cookies = document.cookie.split(';');
+                for (const c of cookies) {
+                    const [k, v] = c.trim().split('=');
+                    if (k && v && v.length > 20) {
+                        if (k.toLowerCase().includes('token') || k.toLowerCase().includes('auth')
+                            || k.toLowerCase().includes('jwt')) {
+                            return v;
+                        }
+                    }
+                }
+                return null;
+            }
+        """)
+
+        if token:
+            self._bearer_token = token
+            logger.info(f"Bearer 토큰 추출 성공 (길이: {len(token)})")
+        else:
+            # 마지막 수단: 실제 API 호출을 캡처하여 토큰 추출
+            token = await self._capture_token_from_request()
+            if token:
+                self._bearer_token = token
+                logger.info(f"API 캡처로 토큰 추출 성공 (길이: {len(token)})")
+            else:
+                logger.error("Bearer 토큰 추출 실패")
+
+        return self._bearer_token
+
+    async def _capture_token_from_request(self) -> Optional[str]:
+        """SPA의 실제 API 요청에서 Authorization 헤더 캡처"""
+        token_holder = {"token": None}
+
+        async def on_request(request):
+            auth = request.headers.get("authorization", "")
+            if auth.startswith("Bearer ") and len(auth) > 20:
+                token_holder["token"] = auth.replace("Bearer ", "")
+
+        self.page.on("request", on_request)
+        try:
+            # SPA가 API를 호출하도록 페이지 새로고침
+            await self.page.reload(timeout=15000)
+            await asyncio.sleep(5)
+        except Exception:
+            pass
+        finally:
+            self.page.remove_listener("request", on_request)
+
+        return token_holder["token"]
+
+    async def _call_api(
+        self,
+        method: str,
+        path: str,
+        data: dict,
+    ) -> tuple[bool, str, dict]:
+        """aggregator API 직접 호출
+
+        Returns: (성공, 메시지, 응답 데이터)
+        """
+        token = await self._extract_bearer_token()
+        if not token:
+            return False, "Bearer 토큰 추출 실패", {}
+
+        url = f"{AGGREGATOR_BASE}{path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Origin": "https://artist.idus.com",
+            "Referer": "https://artist.idus.com/",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                if method == "POST":
+                    resp = await client.post(url, json=data, headers=headers)
+                elif method == "PUT":
+                    resp = await client.put(url, json=data, headers=headers)
+                else:
+                    return False, f"미지원 메서드: {method}", {}
+
+                body = {}
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = {"raw": resp.text[:500]}
+
+                if resp.status_code in (200, 201):
+                    logger.info(f"API 성공: {method} {path} → {resp.status_code}")
+                    return True, "성공", body
+                else:
+                    logger.error(f"API 실패: {method} {path} → {resp.status_code}: {resp.text[:300]}")
+                    return False, f"HTTP {resp.status_code}: {resp.text[:200]}", body
+
+        except Exception as e:
+            logger.error(f"API 호출 실패: {e}")
+            return False, str(e), {}
+
+    def _build_payload(
         self,
         language: str,
         data: LanguageData,
         domestic_images: list[str] = None,
         global_options: list[GlobalOption] = None,
-    ) -> tuple[bool, str]:
-        """특정 언어로 글로벌 작품 등록
-
-        Returns: (성공 여부, 메시지)
-        """
-        lang_label = "영어" if language == "en" else "일본어"
+    ) -> dict:
+        """API payload 구성"""
         lang_code = "en" if language == "en" else "ja"
-        logger.info(f"{lang_label} 등록 시작")
 
-        # 1. 언어 탭 선택
-        tab = self.page.locator(
-            f'.GlobalProductLanguageTab__item:has-text("{lang_label}")'
-        ).first
-        try:
-            if await tab.count() > 0:
-                await tab.click()
-                await asyncio.sleep(3)
-                logger.info(f"'{lang_label}' 탭 선택 완료")
-            else:
-                return False, f"'{lang_label}' 탭 없음"
-        except Exception as e:
-            return False, f"탭 선택 실패: {e}"
-
-        # 2. 작품명 textarea 입력 (SPA v-model 반영)
-        textarea = self.page.locator('textarea[name="globalProductName"]').first
-        title = (data.title or "")[:settings.title_max_length_global]
-        try:
-            if await textarea.count() > 0:
-                await textarea.fill(title)
-                await textarea.dispatch_event("input")
-                logger.info(f"작품명 입력: {title[:30]}...")
-            else:
-                return False, "작품명 textarea 없음"
-        except Exception as e:
-            return False, f"작품명 입력 실패: {e}"
-
-        # 3. 우리 데이터로 교체할 payload 구성
-        descriptions = self._build_descriptions(data)
-        keywords = [kw.strip().lstrip('#') for kw in (data.keywords or []) if kw.strip()]
-        option_groups = self._build_option_groups(global_options, language)
-        images = domestic_images or []
-
-        payload_override = {
-            "name": title,
-            "language_code": lang_code,
-            "images": images,
-            "keywords": keywords,
-            "descriptions": descriptions,
-            "option_groups": option_groups,
-        }
-
-        logger.info(
-            f"{lang_label} payload: 이미지={len(images)}장, "
-            f"키워드={len(keywords)}개, 설명={len(descriptions)}블록, "
-            f"옵션={len(option_groups)}개"
-        )
-
-        # 4. route intercept 등록 — migrate-product API 요청을 가로채서 payload 교체
-        intercept_result = {"intercepted": False, "status": None, "error": None}
-
-        async def intercept_save(route: Route):
-            """SPA의 저장 API 요청을 가로채서 payload를 우리 데이터로 교체"""
-            request = route.request
-            try:
-                # 원본 payload 파싱
-                original = json.loads(request.post_data) if request.post_data else {}
-
-                # 우리 데이터로 교체 (원본의 다른 필드는 유지)
-                modified = {**original, **payload_override}
-
-                logger.info(
-                    f"[intercept] 원본: img={len(original.get('images', []))}, "
-                    f"kw={len(original.get('keywords', []))}, "
-                    f"desc={len(original.get('descriptions', []))} → "
-                    f"수정: img={len(modified.get('images', []))}, "
-                    f"kw={len(modified.get('keywords', []))}, "
-                    f"desc={len(modified.get('descriptions', []))}"
-                )
-
-                # 수정된 payload로 요청 계속 진행
-                await route.continue_(post_data=json.dumps(modified))
-                intercept_result["intercepted"] = True
-
-            except Exception as e:
-                logger.error(f"[intercept] payload 수정 실패: {e}")
-                # 실패 시 원본 요청 그대로 진행
-                await route.continue_()
-                intercept_result["error"] = str(e)
-
-        # route 등록
-        # 디버그 테스트에서 검증된 동일한 패턴 사용
-        route_pattern = "**/migrate-product/**"
-        await self.page.route(route_pattern, intercept_save)
-        logger.info(f"route intercept 등록: {route_pattern}")
-
-        try:
-            # 5. "임시저장" 버튼 클릭
-            await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(0.5)
-
-            save_btn = self.page.locator('button:has-text("임시저장")').first
-            try:
-                if await save_btn.count() > 0:
-                    await save_btn.click()
-                    logger.info("임시저장 버튼 클릭")
-                else:
-                    return False, "임시저장 버튼 없음"
-            except Exception as e:
-                return False, f"임시저장 클릭 실패: {e}"
-
-            # 6. 결과 확인 (스낵바)
-            await asyncio.sleep(3)
-            msg = ""
-            try:
-                snack = self.page.locator('.v-snack__content').first
-                if await snack.count() > 0:
-                    msg = await snack.inner_text()
-            except Exception:
-                pass
-
-            if "완료" in msg:
-                logger.info(f"{lang_label} 임시저장 성공: {msg}")
-                return True, msg
-            elif msg:
-                logger.error(f"{lang_label} 임시저장 실패: {msg}")
-                return False, msg
-            else:
-                # 스낵바 없어도 intercept 성공했으면 OK
-                if intercept_result["intercepted"]:
-                    logger.info(f"{lang_label} 임시저장 완료 (intercept 성공, 스낵바 없음)")
-                    return True, "intercept 성공"
-                return False, "스낵바 없음"
-
-        finally:
-            # route 해제
-            await self.page.unroute("**/migrate-product/**")
-
-    def _build_descriptions(self, data: LanguageData) -> list[dict]:
-        """LanguageData에서 descriptions 배열 구성"""
+        # descriptions (블록 배열)
         descriptions = []
         blocks = getattr(data, 'description_blocks', None) or []
-
         for i, block in enumerate(blocks):
-            block_type = block.get("type", "TEXT")
+            btype = block.get("type", "TEXT")
             value = block.get("value", "")
-
-            if block_type == "IMAGE" and isinstance(value, list):
+            if isinstance(value, list):
                 value = value[0] if value else ""
-            elif isinstance(value, list):
-                value = ", ".join(str(v) for v in value)
-
-            if block_type in ("TEXT", "SUBJECT", "IMAGE", "LINE", "BLANK"):
+            if btype in ("TEXT", "SUBJECT", "IMAGE", "LINE", "BLANK"):
                 descriptions.append({
-                    "type": block_type,
+                    "type": btype,
                     "value": str(value),
                     "label": block.get("label", ""),
                     "sort": i,
                 })
-
-        # 블록이 없으면 HTML에서 간단 변환
         if not descriptions and data.description_html:
             descriptions.append({
                 "type": "TEXT",
@@ -204,25 +216,73 @@ class ProductWriter:
                 "sort": 0,
             })
 
-        return descriptions
+        # keywords
+        keywords = [kw.strip().lstrip('#') for kw in (data.keywords or []) if kw.strip()]
 
-    def _build_option_groups(
-        self, options: list[GlobalOption] = None, language: str = "ja"
-    ) -> list[dict]:
-        """GlobalOption에서 option_groups 배열 구성"""
-        if not options:
-            return []
-        groups = []
-        for opt in options:
-            name = opt.name_en if language == "en" else opt.name_ja
-            values = opt.values_en if language == "en" else opt.values_ja
-            if name and values:
-                groups.append({
-                    "name": name,
-                    "type": opt.option_type or "Basic",
-                    "values": [{"value": v, "price": 0} for v in values],
-                })
-        return groups
+        # option_groups
+        option_groups = []
+        if global_options:
+            for opt in global_options:
+                name = opt.name_en if language == "en" else opt.name_ja
+                values = opt.values_en if language == "en" else opt.values_ja
+                if name and values:
+                    option_groups.append({
+                        "name": name,
+                        "type": opt.option_type or "Basic",
+                        "values": [{"value": v, "price": 0} for v in values],
+                    })
+
+        return {
+            "publish_status": "WRITING",
+            "name": (data.title or "")[:settings.title_max_length_global],
+            "language_code": lang_code,
+            "images": domestic_images or [],
+            "keywords": keywords,
+            "descriptions": descriptions,
+            "option_groups": option_groups,
+            "prohibited_nations": [],
+            "clearance_documents": [],
+        }
+
+    async def register_language(
+        self,
+        domestic_id: int,
+        language: str,
+        data: LanguageData,
+        domestic_images: list[str] = None,
+        global_options: list[GlobalOption] = None,
+    ) -> tuple[bool, str]:
+        """특정 언어로 글로벌 작품 등록 (API 직접 호출)"""
+        lang_label = "영어" if language == "en" else "일본어"
+        logger.info(f"{lang_label} 등록 시작 (API 직접 호출)")
+
+        payload = self._build_payload(
+            language=language,
+            data=data,
+            domestic_images=domestic_images,
+            global_options=global_options,
+        )
+
+        logger.info(
+            f"{lang_label} API 호출: 제목={payload['name'][:30]}..., "
+            f"이미지={len(payload['images'])}장, "
+            f"키워드={len(payload['keywords'])}개, "
+            f"설명={len(payload['descriptions'])}블록, "
+            f"옵션={len(payload['option_groups'])}개"
+        )
+
+        ok, msg, body = await self._call_api(
+            "POST",
+            f"/api/v2/global/migrate-product/{domestic_id}",
+            payload,
+        )
+
+        if ok:
+            logger.info(f"{lang_label} 등록 성공")
+        else:
+            logger.error(f"{lang_label} 등록 실패: {msg}")
+
+        return ok, msg
 
     async def register_global_product(
         self,
@@ -232,7 +292,7 @@ class ProductWriter:
         target_languages: list[str] = None,
         domestic_images: list[str] = None,
     ) -> dict:
-        """글로벌 작품 등록 — route intercept 방식"""
+        """글로벌 작품 등록"""
         if target_languages is None:
             target_languages = []
             if global_data.ja:
@@ -247,7 +307,7 @@ class ProductWriter:
             result["languages_failed"] = target_languages
             return result
 
-        # 글로벌 페이지 이동
+        # 글로벌 페이지로 이동 (토큰 추출을 위해)
         url = f"https://artist.idus.com/product/{product_id}/global"
         logger.info(f"글로벌 페이지 이동: {url}")
         try:
@@ -257,57 +317,50 @@ class ProductWriter:
             logger.warning(f"goto 오류 (계속): {e}")
         await asyncio.sleep(5)
 
-        # textarea 대기
-        try:
-            await self.page.wait_for_selector(
-                'textarea[name="globalProductName"]', timeout=10000
-            )
-        except Exception:
-            logger.error("글로벌 폼 로딩 실패")
+        # domestic_id 가져오기 (Vuex에서)
+        domestic_id = await self.page.evaluate("""
+            () => {
+                const app = document.querySelector('#app');
+                if (!app || !app.__vue__ || !app.__vue__.$store) return 0;
+                return app.__vue__.$store.state.productForm?._item?.id || 0;
+            }
+        """)
+
+        if not domestic_id:
+            logger.error("domestic_id를 가져올 수 없습니다")
             result["languages_failed"] = target_languages
             return result
 
-        logger.info("글로벌 탭 이동 완료")
+        logger.info(f"국내 작품 ID: {domestic_id}")
 
-        # 국내 이미지 (Vuex에서 가져오기)
+        # 국내 이미지 (Vuex에서)
         if not domestic_images:
-            try:
-                domestic_images = await self.page.evaluate("""
-                    () => {
-                        const app = document.querySelector('#app');
-                        if (!app || !app.__vue__ || !app.__vue__.$store) return [];
-                        return app.__vue__.$store.state.productForm?._item?.images || [];
-                    }
-                """)
-                if domestic_images:
-                    logger.info(f"Vuex에서 국내 이미지 {len(domestic_images)}장")
-            except Exception:
-                domestic_images = []
+            domestic_images = await self.page.evaluate("""
+                () => {
+                    const app = document.querySelector('#app');
+                    if (!app || !app.__vue__ || !app.__vue__.$store) return [];
+                    return app.__vue__.$store.state.productForm?._item?.images || [];
+                }
+            """) or []
+            if domestic_images:
+                logger.info(f"Vuex에서 국내 이미지 {len(domestic_images)}장")
+
+        # Bearer 토큰 추출
+        token = await self._extract_bearer_token()
+        if not token:
+            logger.error("Bearer 토큰 추출 실패 — 등록 불가")
+            result["languages_failed"] = target_languages
+            return result
 
         # 각 언어별 등록
-        for i, lang in enumerate(target_languages):
-            # 이전 언어 실패 후 남은 모달/스낵바 정리
-            if i > 0:
-                for _ in range(3):
-                    try:
-                        if await self.page.locator('.v-dialog--active').count() > 0:
-                            ok_btn = self.page.locator('.v-dialog--active button:has-text("확인")').first
-                            if await ok_btn.count() > 0:
-                                await ok_btn.click()
-                            else:
-                                await self.page.keyboard.press("Escape")
-                            await asyncio.sleep(0.5)
-                        else:
-                            break
-                    except Exception:
-                        break
-                await asyncio.sleep(1)
+        for lang in target_languages:
             lang_data = global_data.ja if lang == "ja" else global_data.en
             if not lang_data:
                 result["languages_failed"].append(lang)
                 continue
 
             ok, msg = await self.register_language(
+                domestic_id=domestic_id,
                 language=lang,
                 data=lang_data,
                 domestic_images=domestic_images,
@@ -317,6 +370,5 @@ class ProductWriter:
                 result["languages_success"].append(lang)
             else:
                 result["languages_failed"].append(lang)
-                logger.error(f"{lang} 등록 실패: {msg}")
 
         return result
