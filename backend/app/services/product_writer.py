@@ -260,7 +260,9 @@ class ProductWriter:
             "images": domestic_images or [],
             "keywords": keywords,
             "descriptions": descriptions,
-            "option_groups": option_groups,
+            # option_groups 구조가 서버와 불일치 시 400 에러 발생
+            # 옵션이 있으면 빈 배열로 보내고, 옵션은 UI를 통해 별도 등록
+            "option_groups": [],  # option_groups 구조 확정 후 활성화
             "status": "DRAFT",
             "prohibited_nations": [],
             "clearance_documents": [],
