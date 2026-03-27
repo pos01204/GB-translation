@@ -238,7 +238,7 @@ class ProductWriter:
             "images": domestic_images or [],
             "keywords": keywords,
             "descriptions": descriptions,
-            "option_groups": option_groups,
+            "option_groups": [],  # TODO: 옵션 구조 확인 후 활성화
             "status": "DRAFT",
             "prohibited_nations": [],
             "clearance_documents": [],
@@ -264,6 +264,9 @@ class ProductWriter:
             global_options=global_options,
         )
 
+        # 디버그: 전체 payload 로깅 (첫 500자)
+        import json as _json
+        payload_str = _json.dumps(payload, ensure_ascii=False)
         logger.info(
             f"{lang_label} API 호출: 제목={payload['name'][:30]}..., "
             f"이미지={len(payload['images'])}장, "
@@ -271,6 +274,7 @@ class ProductWriter:
             f"설명={len(payload['descriptions'])}블록, "
             f"옵션={len(payload['option_groups'])}개"
         )
+        logger.info(f"{lang_label} payload 샘플: {payload_str[:500]}")
 
         ok, msg, body = await self._call_api(
             "POST",
