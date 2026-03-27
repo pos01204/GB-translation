@@ -61,7 +61,7 @@ export default function V2Layout({
         <div className="flex items-center justify-between p-3 border-b">
           {sidebarOpen && (
             <span className="text-sm font-semibold text-gray-700">
-              v2 글로벌 등록
+              글로벌 작품 등록
             </span>
           )}
           <button

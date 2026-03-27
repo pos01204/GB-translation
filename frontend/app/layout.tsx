@@ -3,9 +3,9 @@ import './globals.css'
 import { Toaster } from '@/components/ui/toaster'
 
 export const metadata: Metadata = {
-  title: 'Idus 작품 번역기 | 글로벌 번역 자동화',
-  description: '아이디어스 핸드메이드 작품을 영어/일본어로 자동 번역하세요. AI 기반 OCR로 이미지 내 텍스트까지 번역합니다.',
-  keywords: ['아이디어스', 'idus', '번역', '핸드메이드', 'OCR', '영어', '일본어'],
+  title: '글로벌 작품 등록 서비스',
+  description: '아이디어스 핸드메이드 작품을 글로벌 마켓에 자동 등록하세요. AI 기반 번역과 Playwright 자동화로 간편하게 등록합니다.',
+  keywords: ['아이디어스', 'idus', '글로벌', '핸드메이드', '등록', '자동화'],
 }
 
 export default function RootLayout({
@@ -25,32 +25,10 @@ export default function RootLayout({
                   <span className="text-white font-bold text-sm">ID</span>
                 </div>
                 <span className="font-bold text-xl">
-                  <span className="gradient-text">Idus</span>
-                  <span className="text-foreground"> Translator</span>
+                  <span className="gradient-text">글로벌</span>
+                  <span className="text-foreground"> 작품 등록</span>
                 </span>
               </div>
-              <nav className="flex items-center gap-4 text-sm">
-                <a
-                  href="/"
-                  className="text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  v1 번역
-                </a>
-                <a
-                  href="/v2"
-                  className="text-orange-600 hover:text-orange-700 font-medium transition-colors"
-                >
-                  v2 글로벌 등록
-                </a>
-                <a
-                  href="https://www.idus.com"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  아이디어스 ↗
-                </a>
-              </nav>
             </div>
           </header>
 
@@ -66,7 +44,7 @@ export default function RootLayout({
                 © 2024 Idus Translator. 글로벌 비즈니스 자동화 도구.
               </p>
               <p className="text-xs text-muted-foreground">
-                Powered by GPT-4o Vision & Playwright
+                Powered by Claude AI & Playwright
               </p>
             </div>
           </footer>
