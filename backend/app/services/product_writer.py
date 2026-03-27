@@ -206,7 +206,6 @@ class ProductWriter:
                     "type": btype,
                     "value": str(value),
                     "label": block.get("label", ""),
-                    "sort": i,
                 })
         if not descriptions and data.description_html:
             descriptions.append({
@@ -240,8 +239,10 @@ class ProductWriter:
             "keywords": keywords,
             "descriptions": descriptions,
             "option_groups": option_groups,
+            "status": "DRAFT",
             "prohibited_nations": [],
             "clearance_documents": [],
+            "request_push": [],
         }
 
     async def register_language(
